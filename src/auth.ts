@@ -7,6 +7,7 @@ export interface AuthEnv {
   DOMAIN: string;
   JWT_SECRET: string;
   CONSTANCY_KV: KVNamespace;
+  ALLOWED_EMAILS?: string;
 }
 
 // 1. Helpers for base64url and HMAC-SHA256 JWT
@@ -136,6 +137,21 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
     userEmail = url.searchParams.get("user") || url.searchParams.get("email");
   }
 
+  // Whitelist Verification (Double Defense)
+  if (userEmail && env.ALLOWED_EMAILS) {
+    const whitelist = env.ALLOWED_EMAILS.split(",")
+      .map(e => e.trim().toLowerCase())
+      .filter(Boolean);
+    if (!whitelist.includes(userEmail.toLowerCase().trim())) {
+      return new Response(
+        `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#f87171;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="background:#1e293b;padding:2rem;border-radius:1rem;max-width:400px;text-align:center;"><h2>❌ 403 访问受限</h2><p style="color:#94a3b8;">邮箱 <b>${userEmail}</b> 不在白名单授权列表中。</p></div></body></html>`,
+        { status: 403, headers: { "Content-Type": "text/html; charset=utf-8" } }
+      );
+    }
+  }
+
+  const clientId = url.searchParams.get("client_id") || "";
+
   // If still not authenticated, show lightweight authorization confirmation screen
   if (!userEmail) {
     const html = `<!DOCTYPE html>
@@ -159,6 +175,7 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
     <h2>🧬 Constancy MCP</h2>
     <p>Claude 请求连接到您的<b>人基常热认知外脑 (ACTD)</b>。<br>请输入您绑定的管理员邮箱以完成单设备 1 年长效授权：</p>
     <form method="GET" action="/oauth2/authorize">
+      <input type="hidden" name="client_id" value="${clientId}">
       <input type="hidden" name="redirect_uri" value="${redirectUri}">
       <input type="hidden" name="state" value="${state}">
       <input type="hidden" name="code_challenge" value="${codeChallenge}">
