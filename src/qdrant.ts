@@ -240,3 +240,79 @@ export async function scrollNotes(
   return points.slice(0, limit);
 }
 
+export async function searchImagePoints(
+  vector: number[],
+  userId: string,
+  limit: number = 6,
+  env: QdrantEnv
+): Promise<Array<{ id: string; score: number; payload: any }>> {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points/search`;
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({
+      vector,
+      limit,
+      with_payload: true,
+      score_threshold: 0.1,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } }
+        ]
+      }
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Qdrant searchImagePoints error (${res.status}): ${errText}`);
+  }
+
+  const data: any = await res.json();
+  return data.result || [];
+}
+
+export async function getImagePoint(
+  targetId: string,
+  userId: string,
+  env: QdrantEnv
+): Promise<{ id: string; payload?: any } | null> {
+  const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
+
+  // 1. Try direct point ID fetch first
+  const directUrl = `${qdrantUrl}/collections/images/points/${targetId}`;
+  const directRes = await qdrantFetch(directUrl, env);
+  if (directRes.ok) {
+    const directData: any = await directRes.json();
+    if (directData.result && directData.result.payload?.user_id === userId) {
+      return directData.result;
+    }
+  }
+
+  // 2. Try matching image_id in payload
+  const scrollUrl = `${qdrantUrl}/collections/images/points/scroll`;
+  const scrollRes = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 1,
+      with_payload: true,
+      with_vector: false,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } },
+          { key: "image_id", match: { value: targetId } }
+        ]
+      }
+    })
+  });
+
+  if (scrollRes.ok) {
+    const scrollData: any = await scrollRes.json();
+    const points = scrollData.result?.points || [];
+    if (points.length > 0) {
+      return points[0];
+    }
+  }
+
+  return null;
+}
+

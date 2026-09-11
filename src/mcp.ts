@@ -18,6 +18,8 @@ import { getEmbedding, VoyageEnv } from "./voyage";
 import {
   upsertMemoryPoint,
   searchMemoryPoints,
+  searchImagePoints,
+  getImagePoint,
   getTimelinePoints,
   updatePointSpectrum,
   getPointById,
@@ -26,6 +28,8 @@ import {
   QdrantEnv
 } from "./qdrant";
 import { computeBase64Sha256, generateBlobSig } from "./blob";
+
+export const CF_IMAGE_DELIVERY_HASH = "uTkE-E-smfahZbJoOmXVCw";
 
 export interface McpEnv extends VoyageEnv, QdrantEnv {
   JWT_SECRET: string;
@@ -70,7 +74,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "search_memory",
-    description: "按语义意图检索历史记忆。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。返回带有 [🟢确信有效] 或 [🟡临界待核实] 状态标签的记忆卡片。",
+    description: "按语义意图跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态同时召回文字记忆与相关的 Cloudflare 视觉图片卡片（含直接访问链接与沙箱 curl 命令）。",
     inputSchema: {
       type: "object",
       properties: {
@@ -80,11 +84,11 @@ export const MCP_TOOLS = [
         },
         limit: {
           type: "number",
-          description: "返回的最大有效记忆数量，默认 5"
+          description: "返回的最大有效记忆/便签数量，默认 5"
         },
         type: {
           type: "string",
-          description: "限定类型过滤 (可选，如 insight, decision, event, entity, memo)"
+          description: "限定类型过滤 (可选。'all'=全景聚合检索; 'image'=专搜视觉图片; 'note'=便签; 'insight'/'decision'/'event'/'memo'=认知碎片)"
         },
         entity: {
           type: "string",
@@ -97,6 +101,10 @@ export const MCP_TOOLS = [
         include_retired: {
           type: "boolean",
           description: "是否包含已主动废弃/归档的记忆。默认 false (物理屏蔽，彻底避免幽灵干扰)"
+        },
+        include_images: {
+          type: "boolean",
+          description: "是否同时检索并召回匹配的视觉图片，默认 true。当为 true 时，若图库中有语义相近的照片，会直接附带 CDN 访问 URL 与沙箱下载命令。"
         },
         image_url: {
           type: "string",
@@ -316,13 +324,13 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_blob_url",
-    description: "【生成二进制下载 Capability URL】为便签中存储的二进制数据生成具有短期时效（5分钟）的带签名直接下载链接。供客户端或 Claude 代码沙箱通过 curl 直接下载，完全避免大段 Base64 经过 LLM 对话上下文消耗 Token 或产生截断转义损耗。",
+    description: "【二进制与视觉资产召回】根据 ID 召回二进制资源下载链接。支持多态识别：既支持获取 Note 便签中的普通文件附件（PDF/文档/压缩包等，生成带防盗签名的 5 分钟直链），也支持传入 Cloudflare 图片 ID 或关联便签 ID（直接返回 Cloudflare Images 官方 CDN 链接、各尺寸变体与沙箱 curl 命令）。零 Token 传输二进制。",
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "便签或存根的 ID (UUID)"
+          description: "便签 ID (Note UUID) 或 Cloudflare 图片 ID (image_id)"
         }
       },
       required: ["id"]
@@ -485,16 +493,31 @@ export async function executeToolCall(
     const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
     const minValidity = typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2;
     const includeRetired = Boolean(args.include_retired);
+    const typeFilter = (args.type || "").trim();
+    const isImageOnly = typeFilter === "image";
+    const includeImages = args.include_images !== false && (typeFilter === "" || typeFilter === "all" || typeFilter === "image");
 
     const queryInput = (imageUrl || imageBase64)
       ? { text: query, imageUrl, imageBase64 }
       : query;
 
     const queryVector = await getEmbedding(queryInput, env, "query");
-    const candidates = await searchMemoryPoints(queryVector, userId, limit * 3, env, {
-      type: args.type,
-      entity: args.entity
-    });
+
+    const searchMemoriesPromise = isImageOnly
+      ? Promise.resolve([])
+      : searchMemoryPoints(queryVector, userId, limit * 3, env, {
+          type: typeFilter && typeFilter !== "all" ? typeFilter : undefined,
+          entity: args.entity
+        });
+
+    const searchImagesPromise = includeImages
+      ? searchImagePoints(queryVector, userId, Math.min(limit, 8), env)
+      : Promise.resolve([]);
+
+    const [candidates, imageCandidates] = await Promise.all([
+      searchMemoriesPromise,
+      searchImagesPromise
+    ]);
 
     const evaluatedList: EvaluatedMemory[] = [];
 
@@ -587,13 +610,44 @@ export async function executeToolCall(
 
     // Sort by composite_score descending (balancing semantic relevance and temporal freshness)
     evaluatedList.sort((a, b) => (b.composite_score || 0) - (a.composite_score || 0));
-    const results = evaluatedList.slice(0, limit);
+    const memoryResults = evaluatedList.slice(0, limit);
 
-    return {
+    // Format visual image results with ready-to-use CDN URLs and curl commands
+    const imageResults = (imageCandidates || []).map(item => {
+      const p = item.payload || {};
+      const imgId = p.image_id || item.id;
+      const pubUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/public`;
+      const aiUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/ai1024`;
+      return {
+        image_id: imgId,
+        title: p.title || p.filename || "视觉图像资产",
+        filename: p.filename || "image.jpg",
+        description: p.description || "",
+        score: Number((item.score || 0).toFixed(4)),
+        tags: p.tags || [],
+        exif: p.exif || undefined,
+        location: p.location || undefined,
+        created_at: p.created_at,
+        url: pubUrl,
+        ai_vision_url: aiUrl,
+        curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${pubUrl}"`
+      };
+    });
+
+    const totalFound = memoryResults.length + imageResults.length;
+    const returnObj: any = {
       query,
-      found_count: results.length,
-      memories: results
+      found_count: totalFound
     };
+
+    if (memoryResults.length > 0 || !isImageOnly) {
+      returnObj.memories = memoryResults;
+    }
+    if (imageResults.length > 0 || isImageOnly) {
+      returnObj.images = imageResults;
+    }
+
+    return returnObj;
   }
 
   // 3. Tool: get_daily_timeline
@@ -1167,43 +1221,91 @@ export async function executeToolCall(
 
   // 11. Tool: get_blob_url
   if (name === "get_blob_url") {
-    const pointId = (args.id || "").trim();
-    if (!pointId) throw new Error("Missing note id");
+    const targetId = (args.id || "").trim();
+    if (!targetId) throw new Error("Missing id");
 
-    const point = await getPointById(pointId, env);
-    if (!point || !point.payload || point.payload.user_id !== userId) {
-      throw new Error(`Note '${pointId}' not found or unauthorized`);
+    // 1. Try finding in constancy_memories first
+    const point = await getPointById(targetId, env);
+    if (point && point.payload && point.payload.user_id === userId) {
+      const p = point.payload;
+
+      // Branch 1A: Note has native base64 binary attachment
+      if (p.base64) {
+        const exp = Math.floor(nowMs / 1000) + 300; // 5 minutes validity
+        const sig = await generateBlobSig("GET", targetId, userId, exp, env.JWT_SECRET);
+        const domain = env.DOMAIN || "mcp.kufof.uk";
+        const downloadUrl = `https://${domain}/blob/${targetId}?exp=${exp}&sig=${sig}`;
+
+        let sha256 = p.sha256;
+        if (!sha256 && p.base64) {
+          sha256 = await computeBase64Sha256(p.base64);
+          setPointPayload(targetId, { sha256 }, env).catch(() => {});
+        }
+
+        const exactBytes = atob(p.base64).length;
+
+        return {
+          success: true,
+          id: targetId,
+          type: "note_attachment",
+          title: p.title || undefined,
+          download_url: downloadUrl,
+          mime_type: p.mime_type || "application/octet-stream",
+          sha256: sha256 || undefined,
+          size_bytes: exactBytes,
+          expires_at: new Date(exp * 1000).toISOString(),
+          curl_command: `curl -s -o attachment "${downloadUrl}"`
+        };
+      }
+
+      // Branch 1B: Note references Cloudflare Images
+      const cfMatch = p.content?.match(/\[Cloudflare Images ID:\s*([a-zA-Z0-9_-]+)\]/);
+      const linkedImageId = cfMatch ? cfMatch[1] : (p as any).image_id;
+      if (linkedImageId) {
+        const pubUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${linkedImageId}/public`;
+        const aiUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${linkedImageId}/ai1024`;
+        return {
+          success: true,
+          id: targetId,
+          image_id: linkedImageId,
+          type: "cloudflare_image",
+          title: p.title || "视觉图像资产",
+          download_url: pubUrl,
+          ai_vision_url: aiUrl,
+          mime_type: p.mime_type || "image/jpeg",
+          curl_command: `curl -s -o "${linkedImageId}.jpg" "${pubUrl}"`
+        };
+      }
     }
 
-    const p = point.payload;
-    if (!p.base64) {
-      throw new Error(`Note '${pointId}' has no binary payload to download.`);
+    // 2. Try finding in Qdrant images collection (by point UUID or Cloudflare image_id)
+    const imgPoint = await getImagePoint(targetId, userId, env);
+    if (imgPoint && imgPoint.payload) {
+      const p = imgPoint.payload;
+      const imgId = p.image_id || imgPoint.id;
+      const pubUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/public`;
+      const aiUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/ai1024`;
+      return {
+        success: true,
+        id: targetId,
+        image_id: imgId,
+        type: "cloudflare_image",
+        title: p.title || p.filename || "视觉图像资产",
+        description: p.description || undefined,
+        download_url: pubUrl,
+        ai_vision_url: aiUrl,
+        mime_type: "image/jpeg",
+        exif: p.exif || undefined,
+        location: p.location || undefined,
+        curl_command: `curl -s -o "${p.filename || imgId + '.jpg'}" "${pubUrl}"`
+      };
     }
 
-    const exp = Math.floor(nowMs / 1000) + 300; // 5 minutes validity
-    const sig = await generateBlobSig("GET", pointId, userId, exp, env.JWT_SECRET);
-    const domain = env.DOMAIN || "mcp.kufof.uk";
-    const downloadUrl = `https://${domain}/blob/${pointId}?exp=${exp}&sig=${sig}`;
-
-    let sha256 = p.sha256;
-    if (!sha256 && p.base64) {
-      sha256 = await computeBase64Sha256(p.base64);
-      setPointPayload(pointId, { sha256 }, env).catch(() => {});
+    if (point) {
+      throw new Error(`Note '${targetId}' has no binary payload or image attachment.`);
     }
 
-    const exactBytes = p.base64 ? atob(p.base64).length : 0;
-
-    return {
-      success: true,
-      id: pointId,
-      title: p.title || undefined,
-      download_url: downloadUrl,
-      mime_type: p.mime_type || "application/octet-stream",
-      sha256: sha256 || undefined,
-      size_bytes: exactBytes,
-      expires_at: new Date(exp * 1000).toISOString(),
-      curl_command: `curl -s -o attachment "${downloadUrl}"`
-    };
+    throw new Error(`Resource '${targetId}' not found or unauthorized.`);
   }
 
   // 12. Tool: create_upload_url
