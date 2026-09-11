@@ -36,6 +36,7 @@ export interface MemoryPointPayload {
 
   // Optional Note & Raw Scratchpad Fields
   title?: string;
+  image_id?: string;
   base64?: string;
   mime_type?: string;
   sha256?: string;
@@ -76,6 +77,7 @@ export interface EvaluatedMemory {
 
   // Optional Note & Raw Scratchpad Fields
   title?: string;
+  image_id?: string;
   has_base64?: boolean;
   base64_length?: number;
   mime_type?: string;

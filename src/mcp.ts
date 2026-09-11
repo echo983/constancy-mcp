@@ -70,6 +70,18 @@ export async function getSignedImageVariants(
 
 export const AI_VISION_VARIANT_GUIDE = "视觉模型传图分辨率指引：1) 密集文本/架构图/复杂图表选 ai1024；2) 通用场景/日常照片理解选 ai768（推荐默认，精度与Token开销平衡）；3) 快速识别/粗粒度分类选 ai512（极低Token）；4) 用户查看或下载提供 public。所有链接均具备时间签名保护。";
 
+export function extractAssociatedImageId(payload: { image_id?: string; content?: string } | null | undefined): string | null {
+  if (!payload) return null;
+  if (payload.image_id && typeof payload.image_id === "string") {
+    return payload.image_id.trim();
+  }
+  if (typeof payload.content === "string") {
+    const m = payload.content.match(/\[(?:Cloudflare Images ID|图片 ID):\s*([a-zA-Z0-9_-]+)\]/i);
+    if (m) return m[1].trim();
+  }
+  return null;
+}
+
 export interface McpEnv extends VoyageEnv, QdrantEnv {
   JWT_SECRET: string;
   DOMAIN: string;
@@ -632,6 +644,7 @@ export async function executeToolCall(
           retired_at: p.retired_at,
           retired_reason: p.retired_reason,
           title: p.title || undefined,
+          image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
           base64_length: p.base64 ? p.base64.length : undefined,
           mime_type: p.mime_type || undefined
@@ -675,6 +688,7 @@ export async function executeToolCall(
           status_badge: classification.badge,
           prompt_guidance: classification.guidance,
           title: p.title || undefined,
+          image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
           base64_length: p.base64 ? p.base64.length : undefined,
           sha256: p.sha256 || undefined,
@@ -682,14 +696,6 @@ export async function executeToolCall(
         });
       }
     }
-
-    // Sort memories: by composite_score descending, tie-break by timestamp descending
-    evaluatedList.sort((a, b) => {
-      const diff = (b.composite_score || 0) - (a.composite_score || 0);
-      if (Math.abs(diff) > 0.001) return diff;
-      return new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime();
-    });
-    const memoryResults = evaluatedList.slice(0, limit);
 
     // If queryVector is null (pure structured query), sort images by captured_at descending
     if (!queryVector) {
@@ -723,6 +729,29 @@ export async function executeToolCall(
         curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${variants.public}"`
       };
     }));
+
+    // Deduplicate: If an image note's associated visual image is already presented in imageResults,
+    // filter out the duplicate text note so it doesn't waste a memory result slot or clutter LLM context.
+    const returnedImageIds = new Set<string>();
+    for (const img of imageResults) {
+      if (img.image_id) returnedImageIds.add(img.image_id);
+    }
+
+    const deduplicatedMemories = evaluatedList.filter(item => {
+      const assocImgId = item.image_id || extractAssociatedImageId(item);
+      if (assocImgId && returnedImageIds.has(assocImgId)) {
+        return false;
+      }
+      return true;
+    });
+
+    // Sort memories: by composite_score descending, tie-break by timestamp descending
+    deduplicatedMemories.sort((a, b) => {
+      const diff = (b.composite_score || 0) - (a.composite_score || 0);
+      if (Math.abs(diff) > 0.001) return diff;
+      return new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime();
+    });
+    const memoryResults = deduplicatedMemories.slice(0, limit);
 
     const totalFound = memoryResults.length + imageResults.length;
     const returnObj: any = {
@@ -1664,6 +1693,7 @@ export async function executeToolCall(
         t_last_update: nowMs,
         t_last_strong: nowMs,
         title: noteTitle,
+        image_id: imageId,
         mime_type: "image/jpeg"
       };
 
