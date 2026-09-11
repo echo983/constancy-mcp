@@ -95,25 +95,9 @@ export async function verifyBlobSig(
     return false; // Expired
   }
 
-  // Check method-bound signature: METHOD:id:userId:exp
+  // Strict method-bound signature check: METHOD:id:userId:exp
   const expectedWithMethod = await generateBlobSig(method, id, userId, exp, secret);
-  if (timingSafeEqual(sig, expectedWithMethod)) return true;
-
-  // Fallback: id:userId:exp
-  const enc = new TextEncoder();
-  const cryptoKey = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const dataFallback = `${id}:${userId}:${exp}`;
-  const signatureFallback = await crypto.subtle.sign("HMAC", cryptoKey, enc.encode(dataFallback));
-  const binaryFallback = String.fromCharCode(...new Uint8Array(signatureFallback));
-  const expectedFallback = base64UrlEncode(binaryFallback);
-
-  return timingSafeEqual(sig, expectedFallback);
+  return timingSafeEqual(sig, expectedWithMethod);
 }
 
 export async function handleBlobRequest(
@@ -188,6 +172,9 @@ export async function handleBlobRequest(
       headers: {
         "Content-Type": mimeType,
         "Content-Length": String(bytes.byteLength),
+        "Content-Disposition": "attachment",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox; default-src 'none'",
         "ETag": `"${sha256}"`,
         "Cache-Control": "private, max-age=300",
         ...CORS_HEADERS
