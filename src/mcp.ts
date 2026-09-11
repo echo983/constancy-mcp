@@ -126,7 +126,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "search_memory",
-    description: "按语义意图或时空结构化条件跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态语义检索，或纯按时间范围 (date_from / date_to) 与 GPS 地理坐标/半径 (near，支持排除特定范围如'出门在外') 进行结构化过滤。每张图片均提供 variants 多分辨率变体（ai1024 适于密集文本/细微细节、ai768 适于通用场景分析推荐、ai512 极速轻量低 Token、public 用于用户查看）以及沙箱 curl 命令，供大模型根据实际分析需求自主选用。",
+    description: "按语义意图或时空结构化条件跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态语义检索，或纯按时间范围 (date_from / date_to) 与 GPS 地理坐标/半径 (near，支持排除特定范围如'出门在外') 进行结构化过滤。每张图片均提供 variants 多分辨率变体（ai1024 适于密集文本/细微细节、ai768 适于通用场景分析推荐、ai512 极速轻量低 Token、public 用于用户查看）以及沙箱 curl 命令，供大模型根据实际分析需求自主选用。系统已内置视觉资产与关联便签动态去重，避免重复占用结果位。",
     inputSchema: {
       type: "object",
       properties: {
@@ -488,6 +488,10 @@ export const MCP_TOOLS = [
         exif: {
           type: "object",
           description: "可选。相机与拍摄参数元数据 (例如 { device, dateTime, lens, iso, aperture })"
+        },
+        captured_at: {
+          type: "string",
+          description: "可选。拍摄时间 ISO 8601 或 YYYY:MM:DD HH:MM:SS 格式，如未传将尝试从 exif.dateTime 读取，标准化为 UTC ISO 8601 存入"
         },
         create_note: {
           type: "boolean",
