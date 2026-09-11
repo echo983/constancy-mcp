@@ -439,7 +439,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "request_image_upload",
-    description: "【申请 Cloudflare Images 直传凭据】预分配 Cloudflare Images 存储 ID 并生成 5 分钟有效的一次性直传 URL。用于 Claude 或客户端在本地沙箱中直接通过 curl 将图片二进制直传至 Cloudflare Images 永久图库，零 Token 上下文传输。上传成功后，请利用大模型原生视觉能力观察画面细节，调用 commit_image_record 将图片入库至后花园 (search.kufof.uk) 并生成关联便签。",
+    description: "【申请 Cloudflare Images 直传凭据】照片与视觉素材上传流水线第 1 步。当用户要求上传/保存照片或视觉素材到图库/外脑时调用。预分配 Cloudflare Images 存储 ID 并生成 5 分钟有效的一次性直传 URL。用于 Claude 或客户端在本地沙箱中直接通过 curl 将图片二进制直传至 Cloudflare Images 永久图库（零 Token 上下文传输，自动开启签名防泄漏）。上传成功后，由大模型观察画面细节并提取 EXIF/GPS，调用 commit_image_record 完成闭环入库与便签绑定。",
     inputSchema: {
       type: "object",
       properties: {
@@ -452,7 +452,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "commit_image_record",
-    description: "【视觉资产与便签录入】将已上传至 Cloudflare Images 的图片录入 Qdrant 视觉图库（images 集合）并同步在 Constancy 便签库创建一条关联 Note 便签。由 Claude 发挥原生视觉大模型能力生成深度中文描述、识别画面主体细节、文字、坐标与标签。",
+    description: "【视觉资产入库确认】照片与视觉素材上传流水线第 2 步（闭环确认）。图片直传 Cloudflare Images 成功后调用：将图片正式录入 Qdrant 视觉图库（images 集合）并同步在 Constancy 便签库创建关联便签。由 Claude 发挥原生视觉大模型能力生成深度中文描述、识别画面主体细节与文字，并提取传入 EXIF 拍摄时间 (captured_at) 与 GPS 坐标 (latitude/longitude)，以支持后续按时间与地理位置的结构化范围检索。",
     inputSchema: {
       type: "object",
       properties: {
@@ -1573,7 +1573,11 @@ export async function executeToolCall(
       upload_url: uploadUrl,
       filename,
       require_signed_urls: true,
-      instructions: `请在沙箱中使用 curl 执行直接上传：\ncurl -X POST -F "file=@<本地图片绝对路径>" "${uploadUrl}"\n\n上传成功后，请发挥你的视觉大模型能力深度观察画面，然后调用 commit_image_record 工具将该图片录入图库与便签。`
+      instructions: `请在沙箱中按以下 3 步完成照片入库：
+1. 【直传图片】使用 curl 上传二进制（零 Token 上下文传输）：
+   curl -X POST -F "file=@<本地图片绝对路径>" "${uploadUrl}"
+2. 【提取元数据】如果本地沙箱有权限，建议运行 exiftool 或相关命令提取拍摄时间 (DateTimeOriginal)、GPS 经纬度及机型参数。
+3. 【观察画面并入库】上传成功后，发挥原生视觉大模型能力深度观察画面细节，调用 commit_image_record 传入 image_id ("${imageId}")、description、captured_at、latitude、longitude 与 exif，正式完成图库与便签入库。`
     };
   }
 
