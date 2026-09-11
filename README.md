@@ -80,8 +80,8 @@ graph TD
 
 1. `log_memory(content, c_h?, type?, entities?, tags?)`  
    * 主动打点记事。不记闲聊废话，只存高信噪比事实或阶段性决策。
-2. `search_memory(query, limit?, type?, entity?, min_validity?, include_retired?, image_url?, image_base64?)`  
-   * 多模态语义检索 + ACTD 连续懒衰减时效仲裁。基于 `voyage-multimodal-3.5` 统一度量衡，支持文本检索、以图搜文、以图搜图与图文联合检索。综合语义匹配分与时效健康度排序，返回带情商指示牌与动力学指标的记忆卡片。默认过滤 $V < 0.2$ 的沉淀态，物理屏蔽废弃记忆。
+2. `search_memory(query?, limit?, type?, entity?, min_validity?, include_retired?, image_url?, image_base64?, date_from?, date_to?, near?)`  
+   * 多模态语义检索 + ACTD 连续懒衰减时效仲裁 + Qdrant 原生时空结构化过滤。基于 `voyage-multimodal-3.5` 统一度量衡，支持纯文本、以图搜图、图文联合及纯时间/地理范围过滤。内置图片与关联便签动态去重，返回带情商指示牌与动力学指标的记忆卡片。
 3. `get_daily_timeline(date, include_retired?)`  
    * 按时间顺序提取某一天全部碎片与动力学热度指标 ($C_H$、健康度 $V$、状态标签)，供大模型生成每日研发日记（DevLog）与夜间蒸馏。
 4. `confirm_memory(id, note?, c_h?, revive?)`  
@@ -102,6 +102,10 @@ graph TD
     * **Capability 下载链接生成**：为便签中存储的二进制数据生成 5 分钟带签名下载链接。供客户端或 Claude 代码沙箱通过 `curl` 直接下载，完全避免大段 Base64 经过 LLM 对话上下文消耗 Token 或产生截断转义损耗。
 12. `create_upload_url(title?, content?, mime_type?, tags?, c_h?)`  
     * **Capability 直传链接生成**：预分配便签 ID 并生成 5 分钟带签名直接上传链接。允许客户端或 Claude 沙箱通过 `curl -X PUT` 直接将二进制流存入，完全不经过 LLM 对话上下文传输 Base64。
+13. `request_image_upload(filename?, captured_at?, c_h?, tags?)`  
+    * **图片上传流水线（阶段一）**：预分配全局唯一图片 ID，生成直传至 Cloudflare Images 的带签名上传链接与一键直传 curl 命令，实现大文件零 Token 消耗入库。
+14. `commit_image_record(image_id, description, c_h?, tags?, captured_at?, location?, exif?)`  
+    * **图片入库与多模态索引（阶段二）**：在直传完成后调用，由大模型深度观察图像细节生成高信噪比描述，注入 EXIF 拍摄时间与 GPS 经纬度，自动调用 Voyage-Multimodal-3.5 计算视觉向量并建立 Qdrant 索引与关联便签。
 
 ---
 

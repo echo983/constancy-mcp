@@ -203,11 +203,13 @@ export default {
 https://${domain}/sse (Legacy SSE)</pre>
     </div>
 
-    <h3>内置核心工具 (Tools)</h3>
+    <h3>内置核心工具 (14 Tools)</h3>
     <ul>
-      <li><b>log_memory / search_memory</b>: 认知碎片提炼、Voyage-Multimodal-3.5 多模态图文检索与 ACTD 时效仲裁</li>
-      <li><b>save_note / get_note / list_notes / update_note</b>: 极简便签记事本、标签枚举待办与版本审计</li>
-      <li><b>get_blob_url / create_upload_url</b>: S3 风格 Capability 直传直下，沙箱零 Token 传输二进制</li>
+      <li><b>log_memory / search_memory</b>: 认知碎片提炼、时空结构化过滤（时间范围与地理半径）、Voyage-Multimodal-3.5 多模态检索与 ACTD 时效仲裁</li>
+      <li><b>confirm_memory / retire_memory</b>: 临界记忆强信号复核加温与抗熵失效归档（彻底杜绝幽灵诈尸）</li>
+      <li><b>save_note / get_note / list_notes / update_note</b>: 极简便签记事本、标签枚举待办与多版本修订审计</li>
+      <li><b>get_blob_url / create_upload_url</b>: 便签二进制 Capability 直传直下，沙箱零 Token 传输二进制</li>
+      <li><b>request_image_upload / commit_image_record</b>: 高画质多模态图片直传流水线、EXIF 时空元数据与视觉特征向量入库</li>
       <li><b>get_daily_timeline</b>: 提取某日时间线碎片，供大模型生成每日研发日记（DevLog）</li>
       <li><b>upsert_entity</b>: 维护跨周期核心实体百科清单（百年基石级 C_H ≥ 11）</li>
     </ul>
