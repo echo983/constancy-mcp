@@ -161,7 +161,7 @@ export default {
     if (url.pathname === "/api/health") {
       return jsonResponse({
         status: "healthy",
-        version: "1.0.0",
+        version: "1.1.0",
         domain,
         time: new Date().toISOString(),
         qdrant_target: env.QDRANT_URL
