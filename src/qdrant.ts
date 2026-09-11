@@ -47,46 +47,217 @@ export async function upsertMemoryPoint(
   }
 }
 
+export interface NearGeoFilter {
+  latitude?: number;
+  longitude?: number;
+  lat?: number;
+  lon?: number;
+  radius_meters?: number;
+  radius?: number;
+  exclude?: boolean;
+}
+
+export interface StructuredSearchFilter {
+  type?: string;
+  entity?: string;
+  date_from?: string;
+  date_to?: string;
+  near?: NearGeoFilter | null;
+}
+
+export function parseDateFilter(dateStr?: string, isEnd = false): string | null {
+  if (!dateStr || typeof dateStr !== "string") return null;
+  const trimmed = dateStr.trim();
+  if (!trimmed) return null;
+
+  // Case 1: "YYYY-MM"
+  const monthMatch = trimmed.match(/^(\d{4})-(\d{2})$/);
+  if (monthMatch) {
+    const year = parseInt(monthMatch[1], 10);
+    const month = parseInt(monthMatch[2], 10);
+    if (isEnd) {
+      const lastDay = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+      return lastDay.toISOString();
+    } else {
+      const firstDay = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+      return firstDay.toISOString();
+    }
+  }
+
+  // Case 2: "YYYY-MM-DD"
+  const dayMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dayMatch) {
+    const year = parseInt(dayMatch[1], 10);
+    const month = parseInt(dayMatch[2], 10);
+    const day = parseInt(dayMatch[3], 10);
+    if (isEnd) {
+      return new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999)).toISOString();
+    } else {
+      return new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0)).toISOString();
+    }
+  }
+
+  const d = new Date(trimmed);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString();
+  }
+  return null;
+}
+
+export function parseNearFilter(nearInput: any): {
+  latitude: number;
+  longitude: number;
+  radius_meters: number;
+  exclude: boolean;
+} | null {
+  if (!nearInput || typeof nearInput !== "object") return null;
+  const lat = nearInput.latitude ?? nearInput.lat;
+  const lon = nearInput.longitude ?? nearInput.lon;
+  if (typeof lat !== "number" || typeof lon !== "number" || isNaN(lat) || isNaN(lon)) {
+    return null;
+  }
+  const radius = Number(nearInput.radius_meters ?? nearInput.radius ?? 1000.0);
+  const exclude = Boolean(nearInput.exclude);
+  return {
+    latitude: lat,
+    longitude: lon,
+    radius_meters: Math.max(10, isNaN(radius) ? 1000.0 : radius),
+    exclude
+  };
+}
+
+export function normalizeIsoDate(input: any): string | null {
+  if (!input) return null;
+  if (input instanceof Date) {
+    return isNaN(input.getTime()) ? null : input.toISOString();
+  }
+  const str = String(input).trim();
+  if (!str) return null;
+
+  const d = new Date(str);
+  if (!isNaN(d.getTime())) {
+    return d.toISOString();
+  }
+
+  const exifMatch = str.match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(.*)$/);
+  if (exifMatch) {
+    const isoLike = `${exifMatch[1]}-${exifMatch[2]}-${exifMatch[3]}T${exifMatch[4]}:${exifMatch[5]}:${exifMatch[6]}${exifMatch[7].trim() || "Z"}`;
+    const ed = new Date(isoLike);
+    if (!isNaN(ed.getTime())) {
+      return ed.toISOString();
+    }
+  }
+
+  return null;
+}
+
 export async function searchMemoryPoints(
-  vector: number[],
+  vector: number[] | null,
   userId: string,
   limit: number = 10,
   env: QdrantEnv,
-  extraFilter?: any
+  extraFilter?: StructuredSearchFilter
 ) {
-  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/search`;
-  
   const mustFilters: any[] = [
     { key: "user_id", match: { value: userId } }
   ];
+  const mustNotFilters: any[] = [];
 
-  if (extraFilter?.type) {
+  if (extraFilter?.type && extraFilter.type !== "all") {
     mustFilters.push({ key: "type", match: { value: extraFilter.type } });
   }
   if (extraFilter?.entity) {
     mustFilters.push({ key: "entities", match: { value: extraFilter.entity } });
   }
 
-  const res = await qdrantFetch(url, env, {
+  // Structured Date Range Filter (applies to timestamp or captured_at)
+  if (extraFilter?.date_from || extraFilter?.date_to) {
+    const range: any = {};
+    if (extraFilter.date_from) range.gte = extraFilter.date_from;
+    if (extraFilter.date_to) range.lte = extraFilter.date_to;
+    mustFilters.push({
+      should: [
+        { key: "timestamp", range },
+        { key: "captured_at", range }
+      ]
+    });
+  }
+
+  // Structured Geo Filter (applies to location)
+  if (extraFilter?.near) {
+    const near = extraFilter.near;
+    const lat = near.latitude ?? near.lat;
+    const lon = near.longitude ?? near.lon;
+    const radius = near.radius_meters ?? near.radius ?? 1000.0;
+    if (typeof lat === "number" && typeof lon === "number") {
+      const geoRadius = {
+        key: "location",
+        geo_radius: {
+          center: { lat, lon },
+          radius
+        }
+      };
+      if (near.exclude) {
+        mustNotFilters.push({ is_empty: { key: "location" } });
+        mustNotFilters.push(geoRadius);
+      } else {
+        mustFilters.push(geoRadius);
+      }
+    }
+  }
+
+  const filterObj: any = { must: mustFilters };
+  if (mustNotFilters.length > 0) {
+    filterObj.must_not = mustNotFilters;
+  }
+
+  // If vector is provided: execute semantic vector search with filters
+  if (vector && Array.isArray(vector) && vector.length > 0) {
+    const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/search`;
+    const res = await qdrantFetch(url, env, {
+      method: "POST",
+      body: JSON.stringify({
+        vector,
+        limit,
+        with_payload: true,
+        score_threshold: 0.2,
+        filter: filterObj
+      })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Qdrant search error (${res.status}): ${errText}`);
+    }
+
+    const data: any = await res.json();
+    return data.result || [];
+  }
+
+  // Otherwise: execute pure structured scroll query
+  const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/scroll`;
+  const res = await qdrantFetch(scrollUrl, env, {
     method: "POST",
     body: JSON.stringify({
-      vector,
       limit,
       with_payload: true,
-      score_threshold: 0.2,
-      filter: {
-        must: mustFilters
-      }
+      with_vector: false,
+      filter: filterObj
     })
   });
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Qdrant search error (${res.status}): ${errText}`);
+    throw new Error(`Qdrant scroll error (${res.status}): ${errText}`);
   }
 
   const data: any = await res.json();
-  return data.result || [];
+  const points = data.result?.points || [];
+  return points.map((pt: any) => ({
+    id: pt.id,
+    score: 1.0,
+    payload: pt.payload
+  }));
 }
 
 export async function getTimelinePoints(
@@ -241,34 +412,105 @@ export async function scrollNotes(
 }
 
 export async function searchImagePoints(
-  vector: number[],
+  vector: number[] | null,
   userId: string,
   limit: number = 6,
-  env: QdrantEnv
+  env: QdrantEnv,
+  extraFilter?: StructuredSearchFilter
 ): Promise<Array<{ id: string; score: number; payload: any }>> {
-  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points/search`;
-  const res = await qdrantFetch(url, env, {
+  const mustFilters: any[] = [
+    { key: "user_id", match: { value: userId } }
+  ];
+  const mustNotFilters: any[] = [];
+
+  // Structured Date Range Filter (applies to captured_at or exif.dateTime)
+  if (extraFilter?.date_from || extraFilter?.date_to) {
+    const range: any = {};
+    if (extraFilter.date_from) range.gte = extraFilter.date_from;
+    if (extraFilter.date_to) range.lte = extraFilter.date_to;
+    mustFilters.push({
+      should: [
+        { key: "captured_at", range },
+        { key: "exif.dateTime", range }
+      ]
+    });
+  }
+
+  // Structured Geo Filter (applies to location)
+  if (extraFilter?.near) {
+    const near = extraFilter.near;
+    const lat = near.latitude ?? near.lat;
+    const lon = near.longitude ?? near.lon;
+    const radius = near.radius_meters ?? near.radius ?? 1000.0;
+    if (typeof lat === "number" && typeof lon === "number") {
+      const geoRadius = {
+        key: "location",
+        geo_radius: {
+          center: { lat, lon },
+          radius
+        }
+      };
+      if (near.exclude) {
+        mustNotFilters.push({ is_empty: { key: "location" } });
+        mustNotFilters.push(geoRadius);
+      } else {
+        mustFilters.push(geoRadius);
+      }
+    }
+  }
+
+  const filterObj: any = { must: mustFilters };
+  if (mustNotFilters.length > 0) {
+    filterObj.must_not = mustNotFilters;
+  }
+
+  // Vector similarity search if vector is present
+  if (vector && Array.isArray(vector) && vector.length > 0) {
+    const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points/search`;
+    const res = await qdrantFetch(url, env, {
+      method: "POST",
+      body: JSON.stringify({
+        vector,
+        limit,
+        with_payload: true,
+        score_threshold: 0.1,
+        filter: filterObj
+      })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Qdrant searchImagePoints error (${res.status}): ${errText}`);
+    }
+
+    const data: any = await res.json();
+    return data.result || [];
+  }
+
+  // Pure structured query without vector -> scroll
+  const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points/scroll`;
+  const res = await qdrantFetch(scrollUrl, env, {
     method: "POST",
     body: JSON.stringify({
-      vector,
       limit,
       with_payload: true,
-      score_threshold: 0.1,
-      filter: {
-        must: [
-          { key: "user_id", match: { value: userId } }
-        ]
-      }
+      with_vector: false,
+      filter: filterObj
     })
   });
 
   if (!res.ok) {
     const errText = await res.text();
-    throw new Error(`Qdrant searchImagePoints error (${res.status}): ${errText}`);
+    throw new Error(`Qdrant searchImagePoints scroll error (${res.status}): ${errText}`);
   }
 
   const data: any = await res.json();
-  return data.result || [];
+  const points = data.result?.points || [];
+  return points.map((pt: any) => ({
+    id: pt.id,
+    score: 1.0,
+    payload: pt.payload
+  }));
 }
 
 export async function getImagePoint(

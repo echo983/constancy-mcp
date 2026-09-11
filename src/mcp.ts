@@ -27,6 +27,10 @@ import {
   getPointById,
   setPointPayload,
   scrollNotes,
+  parseDateFilter,
+  parseNearFilter,
+  normalizeIsoDate,
+  StructuredSearchFilter,
   QdrantEnv
 } from "./qdrant";
 import { computeBase64Sha256, generateBlobSig } from "./blob";
@@ -110,13 +114,32 @@ export const MCP_TOOLS = [
   },
   {
     name: "search_memory",
-    description: "按语义意图跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态同时召回文字记忆与相关的 Cloudflare 视觉图片卡片。每张图片均提供 variants 多分辨率变体（ai1024 适于密集文本/细微细节、ai768 适于通用场景分析推荐、ai512 极速轻量低 Token、public 用于用户查看）以及沙箱 curl 命令，供大模型根据实际分析需求自主选用。",
+    description: "按语义意图或时空结构化条件跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态语义检索，或纯按时间范围 (date_from / date_to) 与 GPS 地理坐标/半径 (near，支持排除特定范围如'出门在外') 进行结构化过滤。每张图片均提供 variants 多分辨率变体（ai1024 适于密集文本/细微细节、ai768 适于通用场景分析推荐、ai512 极速轻量低 Token、public 用于用户查看）以及沙箱 curl 命令，供大模型根据实际分析需求自主选用。",
     inputSchema: {
       type: "object",
       properties: {
         query: {
           type: "string",
-          description: "搜索问题或查询意图"
+          description: "搜索问题或查询意图 (可选，若已提供 date_from/date_to 或 near 时可为空，将执行纯结构化过滤检索)"
+        },
+        date_from: {
+          type: "string",
+          description: "起始时间过滤，支持 ISO 8601、YYYY-MM-DD 或 YYYY-MM 格式 (如 '2026-08-01', '2026-08', '2026-08-01T00:00:00Z')"
+        },
+        date_to: {
+          type: "string",
+          description: "截止时间过滤，支持 ISO 8601、YYYY-MM-DD 或 YYYY-MM 格式 (如 '2026-08-31', '2026-08', '2026-08-31T23:59:59Z')"
+        },
+        near: {
+          type: "object",
+          description: "基于 GPS 坐标的位置距离过滤 (如'在家附近'或'出门在外')",
+          properties: {
+            latitude: { type: "number", description: "中心纬度 (例如 37.7605)" },
+            longitude: { type: "number", description: "中心经度 (例如 -3.7955)" },
+            radius_meters: { type: "number", description: "搜索半径（米），默认 1000 米" },
+            exclude: { type: "boolean", description: "是否反向排除该区域（设为 true 表示检索远离该位置的照片/便签，如'出门在外'检索），默认 false" }
+          },
+          required: ["latitude", "longitude"]
         },
         limit: {
           type: "number",
@@ -151,7 +174,7 @@ export const MCP_TOOLS = [
           description: "多模态检索：提供图片的 Base64 编码数据 (支持 PNG/JPEG/WEBP/GIF，可选)"
         }
       },
-      required: ["query"]
+      required: []
     }
   },
   {
@@ -524,12 +547,21 @@ export async function executeToolCall(
     const query = (args.query || "").trim();
     const imageUrl = (args.image_url || "").trim() || undefined;
     const imageBase64 = (args.image_base64 || "").trim() || undefined;
-    if (!query && !imageUrl && !imageBase64) throw new Error("Missing query or image input");
+    const dateFrom = parseDateFilter(args.date_from, false);
+    const dateTo = parseDateFilter(args.date_to, true);
+    const near = parseNearFilter(args.near);
+    const typeFilter = (args.type || "").trim();
+    const entity = (args.entity || "").trim() || undefined;
+
+    const hasStructuredFilter = Boolean(dateFrom || dateTo || near || (typeFilter && typeFilter !== "all") || entity);
+
+    if (!query && !imageUrl && !imageBase64 && !hasStructuredFilter) {
+      throw new Error("Missing query, image input, or structured filter (date_from, date_to, near, entity)");
+    }
 
     const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
     const minValidity = typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2;
     const includeRetired = Boolean(args.include_retired);
-    const typeFilter = (args.type || "").trim();
     const isImageOnly = typeFilter === "image";
     const includeImages = args.include_images !== false && (typeFilter === "" || typeFilter === "all" || typeFilter === "image");
 
@@ -537,17 +569,24 @@ export async function executeToolCall(
       ? { text: query, imageUrl, imageBase64 }
       : query;
 
-    const queryVector = await getEmbedding(queryInput, env, "query");
+    const queryVector = (query || imageUrl || imageBase64)
+      ? await getEmbedding(queryInput, env, "query")
+      : null;
+
+    const structuredFilter: StructuredSearchFilter = {
+      type: typeFilter && typeFilter !== "all" ? typeFilter : undefined,
+      entity,
+      date_from: dateFrom || undefined,
+      date_to: dateTo || undefined,
+      near
+    };
 
     const searchMemoriesPromise = isImageOnly
       ? Promise.resolve([])
-      : searchMemoryPoints(queryVector, userId, limit * 3, env, {
-          type: typeFilter && typeFilter !== "all" ? typeFilter : undefined,
-          entity: args.entity
-        });
+      : searchMemoryPoints(queryVector, userId, limit * 3, env, structuredFilter);
 
     const searchImagesPromise = includeImages
-      ? searchImagePoints(queryVector, userId, Math.min(limit, 8), env)
+      ? searchImagePoints(queryVector, userId, Math.min(limit, 8), env, structuredFilter)
       : Promise.resolve([]);
 
     const [candidates, imageCandidates] = await Promise.all([
@@ -644,9 +683,22 @@ export async function executeToolCall(
       }
     }
 
-    // Sort by composite_score descending (balancing semantic relevance and temporal freshness)
-    evaluatedList.sort((a, b) => (b.composite_score || 0) - (a.composite_score || 0));
+    // Sort memories: by composite_score descending, tie-break by timestamp descending
+    evaluatedList.sort((a, b) => {
+      const diff = (b.composite_score || 0) - (a.composite_score || 0);
+      if (Math.abs(diff) > 0.001) return diff;
+      return new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime();
+    });
     const memoryResults = evaluatedList.slice(0, limit);
+
+    // If queryVector is null (pure structured query), sort images by captured_at descending
+    if (!queryVector) {
+      imageCandidates.sort((a: any, b: any) => {
+        const tA = new Date(a.payload?.captured_at || a.payload?.created_at || 0).getTime();
+        const tB = new Date(b.payload?.captured_at || b.payload?.created_at || 0).getTime();
+        return tB - tA;
+      });
+    }
 
     // Format visual image results with ready-to-use signed CDN URLs and curl commands
     const imageResults = await Promise.all((imageCandidates || []).map(async item => {
@@ -662,6 +714,7 @@ export async function executeToolCall(
         tags: p.tags || [],
         exif: p.exif || undefined,
         location: p.location || undefined,
+        captured_at: p.captured_at || p.created_at || undefined,
         created_at: p.created_at,
         expires_in: 7200,
         url: variants.public,
@@ -673,7 +726,8 @@ export async function executeToolCall(
 
     const totalFound = memoryResults.length + imageResults.length;
     const returnObj: any = {
-      query,
+      query: query || undefined,
+      filter: hasStructuredFilter ? structuredFilter : undefined,
       found_count: totalFound
     };
 
@@ -1516,8 +1570,33 @@ export async function executeToolCall(
       location = { lat: args.latitude, lon: args.longitude };
     }
 
-    const exif = args.exif && typeof args.exif === "object" ? args.exif : null;
+    const exif = args.exif && typeof args.exif === "object" ? { ...args.exif } : null;
+    if (!location && exif) {
+      const eLat = exif.latitude ?? exif.lat;
+      const eLon = exif.longitude ?? exif.lon;
+      if (typeof eLat === "number" && typeof eLon === "number") {
+        location = { lat: eLat, lon: eLon };
+      }
+    }
+
     const nowIso = now.toISOString();
+
+    // Determine canonical ISO 8601 captured_at
+    let capturedAtIso: string | null = null;
+    if (args.captured_at) {
+      capturedAtIso = normalizeIsoDate(args.captured_at);
+    }
+    if (!capturedAtIso && exif?.dateTime) {
+      capturedAtIso = normalizeIsoDate(exif.dateTime);
+    }
+    if (!capturedAtIso) {
+      capturedAtIso = nowIso;
+    }
+
+    // Ensure exif.dateTime is canonical ISO format if exif is present
+    if (exif && capturedAtIso) {
+      exif.dateTime = capturedAtIso;
+    }
 
     // Vectorize description with Voyage Multimodal 3.5 (1024-dim)
     const textToEmbed = title ? `${title}\n${description}\n${tags.join(" ")}` : `${description}\n${tags.join(" ")}`;
@@ -1535,6 +1614,7 @@ export async function executeToolCall(
       tags,
       exif,
       location,
+      captured_at: capturedAtIso,
       created_at: nowIso,
       source: "claude"
     };
@@ -1572,8 +1652,10 @@ export async function executeToolCall(
       const notePayload: MemoryPointPayload = {
         user_id: userId,
         content: noteContent,
-        timestamp: nowIso,
-        date: todayStr,
+        timestamp: capturedAtIso || nowIso,
+        captured_at: capturedAtIso || nowIso,
+        location: location || undefined,
+        date: capturedAtIso ? capturedAtIso.slice(0, 10) : todayStr,
         type: "note",
         entities: [],
         tags: ["image", "gallery", ...tags],

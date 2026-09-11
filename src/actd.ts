@@ -30,6 +30,10 @@ export interface MemoryPointPayload {
   // Optional Entity Fields
   entity_name?: string;
 
+  // Optional Spatio-Temporal Fields
+  location?: { lat: number; lon: number } | null;
+  captured_at?: string;
+
   // Optional Note & Raw Scratchpad Fields
   title?: string;
   base64?: string;
