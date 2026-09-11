@@ -21,6 +21,7 @@ import {
   searchImagePoints,
   getImagePoint,
   findEntityPoints,
+  retireMemoryPoints,
   deleteMemoryPoints,
   getTimelinePoints,
   updatePointSpectrum,
@@ -253,27 +254,27 @@ export const MCP_TOOLS = [
   },
   {
     name: "upsert_entity",
-    description: "登记或更新跨越周期的核心常青实体百科（如硬件参数、系统架构组件、团队规范），赋予高阶百年基石常度 (C_H ≥ 11.5，折合半衰期约 100 年)。具备同名幂等更新与历史重复条目自动清理能力。",
+    description: "登记或更新跨越周期的核心常青实体百科（如硬件参数、系统架构组件、团队规范），赋予高阶百年基石常度 (C_H ≥ 11.5，折合半衰期约 100 年)。具备同名幂等更新、revisions 版本审计留痕与历史重复条目自动软归档（retire）能力，绝不破坏历史审计链。",
     inputSchema: {
       type: "object",
       properties: {
         name: {
           type: "string",
-          description: "实体名称（例如 'Duplicacy' 或 'ramws'）"
+          description: "实体标准名称（例如 'Duplicacy' 或 'Constancy MCP'）"
         },
         description: {
           type: "string",
-          description: "实体的确切定义、背景与核心属性规范 (Markdown)"
+          description: "实体的确切定义、架构背景与核心属性规范 (Markdown)"
         },
         aliases: {
           type: "array",
           items: { type: "string" },
-          description: "实体的常用别名 (例如 ['ramcp', 'ramrs'])"
+          description: "【严格同一本体的别名】实体的同义词、简称或代号（必须与本实体指代完全相同的同一件事物，例如 ['外脑', 'constancy-mcp']）。【注意】严禁将关联组件、上下游技术栈或理论模型填入别名！"
         },
         relations: {
           type: "array",
           items: { type: "string" },
-          description: "关联的其他实体名称"
+          description: "【关联的独立实体】本实体所依赖、关联或衍生的其他独立实体名称（例如 ['ACTD v1.0', 'Voyage AI', 'Qdrant', 'Cloudflare Images']）"
         }
       },
       required: ["name", "description"]
@@ -965,45 +966,91 @@ export async function executeToolCall(
     const desc = (args.description || "").trim();
     if (!entityName || !desc) throw new Error("Missing name or description");
 
-    const fullContent = `【核心实体: ${entityName}】\n${desc}\n(别名: ${(args.aliases || []).join(", ") || "无"})`;
+    const aliases: string[] = Array.isArray(args.aliases)
+      ? args.aliases.map((a: any) => String(a).trim()).filter(Boolean)
+      : [];
+    const relations: string[] = Array.isArray(args.relations)
+      ? args.relations.map((r: any) => String(r).trim()).filter(Boolean)
+      : [];
+
+    let fullContent = `【核心实体: ${entityName}】\n${desc}`;
+    if (aliases.length > 0) {
+      fullContent += `\n(别名: ${aliases.join(", ")})`;
+    }
+    if (relations.length > 0) {
+      fullContent += `\n(关联实体: ${relations.join(", ")})`;
+    }
+
     // Entities inherently enjoy foundation constancy (C_H >= 11.5)
     const chPrior = 11.5;
     const initialSpectrum = injectIntent(new Array(7).fill(1.5), 1.0);
-
-    const payload: MemoryPointPayload = {
-      user_id: userId,
-      content: fullContent,
-      timestamp: now.toISOString(),
-      date: todayStr,
-      type: "entity",
-      entity_name: entityName,
-      entities: [entityName, ...(args.aliases || []), ...(args.relations || [])],
-      tags: ["entity_registry", "core_knowledge"],
-      ch_prior: chPrior,
-      h_spectrum: initialSpectrum,
-      t_last_update: nowMs,
-      t_last_strong: nowMs
-    };
-
-    const vector = await getEmbedding(fullContent, env, "document");
 
     // Idempotent upsert: check if entity already exists for this user
     const existingPoints = await findEntityPoints(entityName, userId, env);
     let pointId: string;
     let isUpdate = false;
+    let originalCreatedAt = now.toISOString();
+    let existingRevisions: NoteRevision[] = [];
 
     if (existingPoints.length > 0) {
       isUpdate = true;
-      pointId = existingPoints[0].id;
-      // If there are duplicate points from past runs, purge the duplicates to ensure single source of truth
+      const primaryPoint = existingPoints[0];
+      pointId = primaryPoint.id;
+      const oldPayload = primaryPoint.payload;
+
+      if (oldPayload) {
+        originalCreatedAt = oldPayload.created_at || oldPayload.timestamp || originalCreatedAt;
+        existingRevisions = Array.isArray(oldPayload.revisions) ? [...oldPayload.revisions] : [];
+
+        // 若内容、别名或关联发生变化，将旧版本压入 revisions 审计链留痕
+        if (oldPayload.content !== fullContent) {
+          existingRevisions.unshift({
+            timestamp: now.toISOString(),
+            content: oldPayload.content,
+            title: entityName,
+            entity_name: entityName,
+            aliases: oldPayload.aliases || [],
+            relations: oldPayload.relations || [],
+            tags: oldPayload.tags,
+            reason: "Updated entity specification"
+          });
+          // 最多保留 5 版历史快照
+          if (existingRevisions.length > 5) {
+            existingRevisions = existingRevisions.slice(0, 5);
+          }
+        }
+      }
+
+      // 如果有历史遗留的重复同名点，绝不物理删除，而是调用 retire 软归档沉淀，保留历史审计轨迹
       if (existingPoints.length > 1) {
         const duplicateIds = existingPoints.slice(1).map(p => p.id);
-        await deleteMemoryPoints(duplicateIds, env);
+        await retireMemoryPoints(duplicateIds, `Superseded by canonical entity update (${pointId})`, env);
       }
     } else {
       pointId = crypto.randomUUID();
     }
 
+    const payload: MemoryPointPayload = {
+      user_id: userId,
+      content: fullContent,
+      timestamp: originalCreatedAt, // 保持初始创建时间戳不变
+      created_at: originalCreatedAt,
+      updated_at: isUpdate ? now.toISOString() : undefined,
+      date: todayStr,
+      type: "entity",
+      entity_name: entityName,
+      aliases: aliases,
+      relations: relations,
+      entities: [entityName, ...aliases], // 严格限定为实体名与真正同义词，杜绝 relations 污染 entities
+      tags: ["entity_registry", "core_knowledge"],
+      ch_prior: chPrior,
+      h_spectrum: initialSpectrum,
+      t_last_update: nowMs,
+      t_last_strong: nowMs,
+      revisions: existingRevisions.length > 0 ? existingRevisions : undefined
+    };
+
+    const vector = await getEmbedding(fullContent, env, "document");
     await upsertMemoryPoint(pointId, vector, payload, env);
 
     return {
@@ -1012,8 +1059,10 @@ export async function executeToolCall(
       point_id: pointId,
       updated: isUpdate,
       c_h: chPrior,
+      revisions_count: existingRevisions.length,
+      retired_duplicates_count: existingPoints.length > 1 ? existingPoints.length - 1 : 0,
       message: isUpdate
-        ? `🏛️ 已成功更新实体 '${entityName}' 的百科条目（常度: 11.5，百年基石级${existingPoints.length > 1 ? `，已清理 ${existingPoints.length - 1} 条历史重复条目` : ""}）`
+        ? `🏛️ 已成功更新实体 '${entityName}' 的百科条目（常度: 11.5，百年基石级，已记录版本审计快照${existingPoints.length > 1 ? `，已软归档 ${existingPoints.length - 1} 条历史重复条目` : ""}）`
         : `🏛️ 已成功将实体 '${entityName}' 固化至核心实体百科清单 (常度: 11.5，百年基石级)`
     };
   }
@@ -1744,7 +1793,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.3.0",
+          version: "1.3.1",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }

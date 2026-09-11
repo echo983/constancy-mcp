@@ -29,6 +29,10 @@ export interface MemoryPointPayload {
 
   // Optional Entity Fields
   entity_name?: string;
+  aliases?: string[];
+  relations?: string[];
+  created_at?: string;
+  updated_at?: string;
 
   // Optional Spatio-Temporal Fields
   location?: { lat: number; lon: number } | null;
@@ -47,9 +51,13 @@ export interface NoteRevision {
   timestamp: string;      // ISO8601 when this snapshot was created/archived
   content: string;
   title?: string;
+  entity_name?: string;
+  aliases?: string[];
+  relations?: string[];
   tags?: string[];
   mime_type?: string;
   sha256?: string;
+  reason?: string;
 }
 
 export type HealthStatus = "FRESH" | "DRIFTING" | "DORMANT";

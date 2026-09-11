@@ -574,6 +574,9 @@ export async function findEntityPoints(
         must: [
           { key: "user_id", match: { value: userId } },
           { key: "type", match: { value: "entity" } }
+        ],
+        must_not: [
+          { key: "retired", match: { value: true } }
         ]
       }
     })
@@ -602,6 +605,30 @@ export async function findEntityPoints(
     }
     return false;
   });
+}
+
+export async function retireMemoryPoints(
+  pointIds: string[],
+  reason: string,
+  env: QdrantEnv
+): Promise<void> {
+  if (!pointIds || pointIds.length === 0) return;
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/payload?wait=true`;
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({
+      points: pointIds,
+      payload: {
+        retired: true,
+        retired_at: new Date().toISOString(),
+        retired_reason: reason
+      }
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`Qdrant retireMemoryPoints error (${res.status}): ${errText}`);
+  }
 }
 
 export async function deleteMemoryPoints(
