@@ -22,6 +22,10 @@ export interface MemoryPointPayload {
   h_spectrum: number[];   // 7-dim float vector for s=0..6
   t_last_update: number;  // Epoch ms
   t_last_strong: number;  // Epoch ms
+  // Explicit Retirement Lifecycle Fields
+  retired?: boolean;
+  retired_at?: string;
+  retired_reason?: string;
 }
 
 export type HealthStatus = "FRESH" | "DRIFTING" | "DORMANT";
@@ -43,6 +47,9 @@ export interface EvaluatedMemory {
   status: HealthStatus;
   status_badge: string;
   prompt_guidance: string;
+  retired?: boolean;
+  retired_at?: string;
+  retired_reason?: string;
 }
 
 /**
@@ -132,19 +139,52 @@ export function computeEpistemicHealth(
 
 /**
  * Classifies proposition health into the 3-state decision machine
+ * Integrates retirement status and epistemic veracity (fact vs unverified rumor/memo)
  */
-export function classifyHealth(V: number): {
+export function classifyHealth(
+  V: number,
+  tags: string[] = [],
+  type: string = "",
+  retired: boolean = false,
+  retiredReason: string = ""
+): {
   status: HealthStatus;
   badge: string;
   guidance: string;
 } {
+  if (retired) {
+    return {
+      status: "DORMANT",
+      badge: "⚪ 已废弃归档 (Retired)",
+      guidance: `⚠️ 该记录已被主动标记废弃（原因: ${retiredReason || "无"}），仅作历史审计，严禁作为有效事实使用！`
+    };
+  }
+
+  const isUnverified = tags.some(t => 
+    ["unverified", "rumor", "speculation", "hearsay", "传闻", "未证实"].includes(t.toLowerCase())
+  ) || type === "memo";
+
   if (V >= 0.7) {
+    if (isUnverified) {
+      return {
+        status: "FRESH",
+        badge: "🟢 确信时效 (Fresh / 未证实)",
+        guidance: "该信息处于新鲜时效期内，但其属性为【未证实传闻/主观备忘】。向用户表达时必须明确说明信源背景与未证实属性，严禁断言为既成事实。"
+      };
+    }
     return {
       status: "FRESH",
       badge: "🟢 确信有效 (Fresh)",
       guidance: "可直接作为坚实先验引用，无需向用户多余确认。"
     };
   } else if (V >= 0.2) {
+    if (isUnverified) {
+      return {
+        status: "DRIFTING",
+        badge: "🟡 临界待核实 (Drifting / 未证实)",
+        guidance: "该未证实传闻/备忘已跨越常规讨论周期，极可能已辟谣或落地，必须向用户核实最新进展。"
+      };
+    }
     return {
       status: "DRIFTING",
       badge: "🟡 临界待核实 (Drifting)",

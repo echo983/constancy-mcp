@@ -85,6 +85,10 @@ export const MCP_TOOLS = [
         min_validity: {
           type: "number",
           description: "时效健康度 V 门槛 (0.0 ~ 1.0)。默认 0.2 (自动过滤 ⚪ 蒸发态/Dormant 记忆；设为 0.7 可仅查看 🟢 确信有效)"
+        },
+        include_retired: {
+          type: "boolean",
+          description: "是否包含已主动废弃/归档的记忆。默认 false (物理屏蔽，彻底避免幽灵干扰)"
         }
       },
       required: ["query"]
@@ -99,6 +103,10 @@ export const MCP_TOOLS = [
         date: {
           type: "string",
           description: "日期字符串，格式 YYYY-MM-DD (例如 2026-09-11)"
+        },
+        include_retired: {
+          type: "boolean",
+          description: "是否包含已主动废弃/归档的记忆。默认 false"
         }
       },
       required: ["date"]
@@ -106,7 +114,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "confirm_memory",
-    description: "【闭环关键工具】当用户确认某条记忆（特别是处于 🟡 临界待核实 状态）仍然有效成立时调用。刷新强验证时间戳 t_last_strong，注入强信号意图热度，使其重归 🟢 确信有效 状态。可选追加更新备注或调整常度。",
+    description: "【闭环关键工具】当用户确认某条记忆（特别是处于 🟡 临界待核实 状态）仍然有效成立时调用。刷新强验证时间戳 t_last_strong，注入强信号意图热度，使其重归 🟢 确信有效 状态。若该记忆已被废弃，可传入 revive: true 进行复活推翻。",
     inputSchema: {
       type: "object",
       properties: {
@@ -121,6 +129,10 @@ export const MCP_TOOLS = [
         c_h: {
           type: "number",
           description: "修正或提升的人基常度 C_H (可选，若用户明确其为更长期规则可直接升级)"
+        },
+        revive: {
+          type: "boolean",
+          description: "若目标记忆已处于废弃归档状态，传入 true 可推翻废弃并满血复活该记忆"
         }
       },
       required: ["id"]
@@ -235,6 +247,7 @@ export async function executeToolCall(
     if (!query) throw new Error("Missing query");
     const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
     const minValidity = typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2;
+    const includeRetired = Boolean(args.include_retired);
 
     const queryVector = await getEmbedding(query, env, "query");
     const candidates = await searchMemoryPoints(queryVector, userId, limit * 3, env, {
@@ -248,24 +261,56 @@ export async function executeToolCall(
       const p: MemoryPointPayload = item.payload;
       if (!p) continue;
 
+      const isRetired = Boolean(p.retired);
+      if (isRetired && !includeRetired) {
+        continue; // Strictly filter out retired memories by default
+      }
+
+      const similarityScore = Number((item.score || 0).toFixed(4));
+
+      if (isRetired) {
+        const classification = classifyHealth(0.0, p.tags || [], p.type || "", true, p.retired_reason || "");
+        // Severely penalize composite score for retired memories so they rank at the bottom
+        const compositeScore = Number((similarityScore * 0.01).toFixed(4));
+        evaluatedList.push({
+          id: item.id,
+          content: p.content,
+          type: p.type,
+          entities: p.entities || [],
+          tags: p.tags || [],
+          timestamp: p.timestamp,
+          date: p.date,
+          ch_prior: 0.0,
+          ch_dynamic: 0.0,
+          resonant_heat: 0.0,
+          similarity_score: similarityScore,
+          composite_score: compositeScore,
+          validity: 0.0,
+          status: classification.status,
+          status_badge: classification.badge,
+          prompt_guidance: classification.guidance,
+          retired: true,
+          retired_at: p.retired_at,
+          retired_reason: p.retired_reason
+        });
+        continue;
+      }
+
       // 1. Continuous Lazy Decay from last persistent update to now
       const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
       
       // 2. Pure read-only evaluation (Zero artificial +0.4 bias!)
-      const chDynamic = computeDynamicCh(p.ch_prior || 9.0, decayedH);
+      // Bug fix: use nullish coalescing ?? so 0 is NOT replaced by 9.0!
+      const chDynamic = computeDynamicCh(p.ch_prior ?? 9.0, decayedH);
       const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
 
       // 3. Compute Epistemic Health V (t_last_strong is NEVER updated by passive search)
       const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
-      const classification = classifyHealth(V);
+      const classification = classifyHealth(V, p.tags || [], p.type || "", false, "");
 
       // 4. Semantic similarity score & Composite Ranking
-      const similarityScore = Number((item.score || 0).toFixed(4));
       // Composite Score: Semantic score is primary; V modulates confidence (0.6 + 0.4 * V)
       const compositeScore = Number((similarityScore * (0.6 + 0.4 * V)).toFixed(4));
-
-      // Note: Passive search does NOT write back to persistent Qdrant!
-      // This eliminates write amplification and prevents the "Ghost Resuscitation" feedback loop.
 
       // 5. Filter by min_validity threshold (default >= 0.2, discarding DORMANT)
       if (V >= minValidity) {
@@ -277,7 +322,7 @@ export async function executeToolCall(
           tags: p.tags || [],
           timestamp: p.timestamp,
           date: p.date,
-          ch_prior: p.ch_prior,
+          ch_prior: p.ch_prior ?? 9.0,
           ch_dynamic: chDynamic,
           resonant_heat: Number(resonantHeat.toFixed(2)),
           similarity_score: similarityScore,
@@ -304,31 +349,57 @@ export async function executeToolCall(
   // 3. Tool: get_daily_timeline
   if (name === "get_daily_timeline") {
     const date = (args.date || todayStr).trim();
+    const includeRetired = Boolean(args.include_retired);
     const points = await getTimelinePoints(userId, date, env);
 
-    const timeline = points.map((p: any) => {
+    const timeline: any[] = [];
+    for (const p of points) {
       const payload: MemoryPointPayload = p.payload || {};
+      const isRetired = Boolean(payload.retired);
+      if (isRetired && !includeRetired) continue;
+
+      if (isRetired) {
+        const classification = classifyHealth(0.0, payload.tags || [], payload.type || "", true, payload.retired_reason || "");
+        timeline.push({
+          id: p.id,
+          time: payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString("zh-CN", { hour12: false }) : "",
+          timestamp: payload.timestamp,
+          type: payload.type,
+          entities: payload.entities || [],
+          content: payload.content,
+          c_h: 0.0,
+          ch_dynamic: 0.0,
+          resonant_heat: 0.0,
+          validity: 0.0,
+          status: classification.status,
+          status_badge: classification.badge,
+          retired: true,
+          retired_reason: payload.retired_reason
+        });
+        continue;
+      }
+
       const decayedH = decaySpectrum(payload.h_spectrum || new Array(7).fill(0), payload.t_last_update || nowMs, nowMs);
-      const chDynamic = computeDynamicCh(payload.ch_prior || 9.0, decayedH);
+      const chDynamic = computeDynamicCh(payload.ch_prior ?? 9.0, decayedH);
       const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
       const V = computeEpistemicHealth(chDynamic, resonantHeat, payload.t_last_strong || nowMs, nowMs);
-      const classification = classifyHealth(V);
+      const classification = classifyHealth(V, payload.tags || [], payload.type || "", false, "");
 
-      return {
+      timeline.push({
         id: p.id,
         time: payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString("zh-CN", { hour12: false }) : "",
         timestamp: payload.timestamp,
         type: payload.type,
         entities: payload.entities || [],
         content: payload.content,
-        c_h: payload.ch_prior,
+        c_h: payload.ch_prior ?? 9.0,
         ch_dynamic: chDynamic,
         resonant_heat: Number(resonantHeat.toFixed(2)),
         validity: V,
         status: classification.status,
         status_badge: classification.badge
-      };
-    });
+      });
+    }
 
     return {
       date,
@@ -344,6 +415,7 @@ export async function executeToolCall(
     if (!pointId) throw new Error("Missing memory id");
     const note = (args.note || "").trim();
     const newCh = typeof args.c_h === "number" ? args.c_h : undefined;
+    const revive = Boolean(args.revive);
 
     const point = await getPointById(pointId, env);
     if (!point || !point.payload || point.payload.user_id !== userId) {
@@ -351,17 +423,26 @@ export async function executeToolCall(
     }
 
     const p = point.payload;
+
+    if (p.retired && !revive) {
+      throw new Error(`❌ 记忆 [${pointId}] 处于【已废弃归档】状态（原因: ${p.retired_reason || "无"}）。如需推翻废弃并满血复活，请明确传入 revive: true。`);
+    }
+
     // 1. Decay to now
     const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
     // 2. Strong Signal Intent Injection
     const updatedH = injectIntent(decayedH, 1.0);
-    // 3. Update C_H prior if specified
-    const updatedChPrior = newCh !== undefined ? newCh : p.ch_prior;
+    // 3. Update C_H prior if specified (or restore default 9.0 if revived)
+    const updatedChPrior = newCh !== undefined ? newCh : (p.retired ? 9.0 : (p.ch_prior ?? 9.0));
     const chDynamic = computeDynamicCh(updatedChPrior, updatedH);
     const resonantHeat = interpolateResonantHeat(updatedH, chDynamic);
 
-    // 4. Refresh t_last_strong to nowMs!
+    // 4. Refresh content
     let updatedContent = p.content;
+    if (p.retired && revive) {
+      // Strip retired header if present
+      updatedContent = updatedContent.replace(/^【已废弃\/失效归档[^】]*】\s*\n?/, "");
+    }
     if (note) {
       const dateTag = now.toISOString().slice(0, 10);
       updatedContent = `${updatedContent}\n\n【核实验证记录 (${dateTag})】: ${note}`;
@@ -372,13 +453,16 @@ export async function executeToolCall(
       ch_prior: updatedChPrior,
       h_spectrum: updatedH,
       t_last_update: nowMs,
-      t_last_strong: nowMs
+      t_last_strong: nowMs,
+      retired: false,
+      retired_at: undefined,
+      retired_reason: undefined
     };
 
     await setPointPayload(pointId, payloadUpdate, env);
 
     const newV = computeEpistemicHealth(chDynamic, resonantHeat, nowMs, nowMs);
-    const classification = classifyHealth(newV);
+    const classification = classifyHealth(newV, p.tags || [], p.type || "", false, "");
 
     return {
       success: true,
@@ -389,7 +473,9 @@ export async function executeToolCall(
       validity: newV,
       status: classification.status,
       status_badge: classification.badge,
-      message: `✅ 已成功确证记忆 [${pointId}]。强验证时间戳已刷新至当前，状态重归 ${classification.badge}。`
+      message: p.retired
+        ? `✅ 已成功推翻废弃并满血复活记忆 [${pointId}]。状态重归 ${classification.badge}。`
+        : `✅ 已成功确证记忆 [${pointId}]。强验证时间戳已刷新至当前，状态重归 ${classification.badge}。`
     };
   }
 
@@ -406,11 +492,17 @@ export async function executeToolCall(
 
     const p = point.payload;
     const dateTag = now.toISOString().slice(0, 10);
-    const retiredContent = `【已废弃/失效归档 (${dateTag}) - 原因: ${reason}】\n${p.content}`;
+    let retiredContent = p.content;
+    if (!retiredContent.startsWith("【已废弃/失效归档")) {
+      retiredContent = `【已废弃/失效归档 (${dateTag}) - 原因: ${reason}】\n${p.content}`;
+    }
 
+    // Preserve original p.type! Do NOT overwrite with "retired"!
     const payloadUpdate: Partial<MemoryPointPayload> & Record<string, any> = {
       content: retiredContent,
-      type: "retired",
+      retired: true,
+      retired_at: new Date().toISOString(),
+      retired_reason: reason,
       ch_prior: 0.0,
       h_spectrum: new Array(7).fill(0),
       t_last_update: nowMs,
@@ -424,8 +516,8 @@ export async function executeToolCall(
       id: pointId,
       validity: 0.0,
       status: "DORMANT",
-      status_badge: "⚪ 静默沉淀 (Dormant)",
-      message: `📦 记忆 [${pointId}] 已成功标记为废弃归档。时效健康度置为 0，未来检索将自动静默过滤。`
+      status_badge: "⚪ 已废弃归档 (Retired)",
+      message: `📦 记忆 [${pointId}] 已标记为废弃归档 (原因: ${reason})。未来检索将自动物理屏蔽，彻底避免幽灵干扰。`
     };
   }
 

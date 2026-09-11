@@ -80,14 +80,14 @@ graph TD
 
 1. `log_memory(content, c_h?, type?, entities?, tags?)`  
    * 主动打点记事。不记闲聊废话，只存高信噪比事实或阶段性决策。
-2. `search_memory(query, limit?, type?, entity?, min_validity?)`  
-   * 语义检索 + ACTD 连续懒衰减时效仲裁。综合语义匹配分与时效健康度排序，返回带情商指示牌与动力学指标的记忆卡片。默认过滤 $V < 0.2$ 的沉淀态。
-3. `get_daily_timeline(date)`  
+2. `search_memory(query, limit?, type?, entity?, min_validity?, include_retired?)`  
+   * 语义检索 + ACTD 连续懒衰减时效仲裁。综合语义匹配分与时效健康度排序，返回带情商指示牌与动力学指标的记忆卡片。默认过滤 $V < 0.2$ 的沉淀态，物理屏蔽废弃记忆。
+3. `get_daily_timeline(date, include_retired?)`  
    * 按时间顺序提取某一天全部碎片与动力学热度指标 ($C_H$、健康度 $V$、状态标签)，供大模型生成每日研发日记（DevLog）与夜间蒸馏。
-4. `confirm_memory(id, note?, c_h?)`  
-   * **🟡 状态闭环工具**：当用户核实某条临界记忆依然有效时调用，强信号刷新验证时间戳并注入热度，使记忆满血重归 🟢 确信有效。
+4. `confirm_memory(id, note?, c_h?, revive?)`  
+   * **🟡 状态闭环工具**：当用户核实某条临界记忆依然有效时调用，强信号刷新验证时间戳并注入热度，使记忆满血重归 🟢 确信有效。若记忆已废弃，可传入 `revive: true` 撤销废弃复活。
 5. `retire_memory(id, reason)`  
-   * **抗熵归档工具**：主动将已过时或已被推翻的记忆标记失效沉淀 ($V \to 0$)，杜绝死灰复燃。
+   * **抗熵归档工具**：显式设置 `retired: true`，保留原业务分类 `type`，将已过时或已被推翻的记忆标记失效沉淀 ($V \to 0$)，杜绝死灰复燃。
 6. `upsert_entity(name, description, aliases?, relations?)`  
    * 维护跨越周期的高阶常青实体百科清单 ($C_H \ge 11.0$)。
 
