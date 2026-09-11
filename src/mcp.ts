@@ -93,7 +93,7 @@ export interface McpEnv extends VoyageEnv, QdrantEnv {
 export const MCP_TOOLS = [
   {
     name: "log_memory",
-    description: "主动向人基常热记忆体写入一条重要认知碎片、决策或事实。系统会自动维护 7 维时间能量谱与衰减周期。",
+    description: "主动向人基常热记忆体写入一条重要认知碎片、决策或事实。系统基于 ACTD 动力学维护 7 维时间能量谱与连续懒衰减，自动计算时效健康度 V。",
     inputSchema: {
       type: "object",
       properties: {
@@ -103,7 +103,7 @@ export const MCP_TOOLS = [
         },
         c_h: {
           type: "number",
-          description: "预期人基常度 C_H (可选)。参考值: 7.8=天气/时效预报; 8.8=本周任务; 9.8=季度架构决策; 11.0+=长期常青硬件事实。默认 9.0 (约11.5天)。"
+          description: "预期人基常度 C_H (可选)。数学定义: C_H = log₁₀(稳定半衰期 / 1毫秒)。标尺刻度: 7.8≈17小时(时效/天气预报); 8.8≈1周(日常任务/便签); 9.0≈11.5天(通用默认); 9.8≈2个月(季度决策); ≥11.0≈3年以上(常青基石/硬件事实)。系统据此连续自动懒衰减并计算时效健康度 V。"
         },
         type: {
           type: "string",
@@ -223,7 +223,7 @@ export const MCP_TOOLS = [
         },
         c_h: {
           type: "number",
-          description: "修正或提升的人基常度 C_H (可选，若用户明确其为更长期规则可直接升级)"
+          description: "修正或提升的人基常度 C_H (可选，C_H = log₁₀(半衰期/1ms)。若用户明确其为更长期规则可直接升级，例如提至 9.8 季度方案或 ≥11.0 常青基石)"
         },
         revive: {
           type: "boolean",
@@ -253,7 +253,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "upsert_entity",
-    description: "登记或更新跨越周期的核心实体百科（如硬件参数、系统架构组件、团队规范），赋予高阶基石常度 (C_H ≥ 11.0, 长期常青基石)。",
+    description: "登记或更新跨越周期的核心常青实体百科（如硬件参数、系统架构组件、团队规范），赋予高阶百年基石常度 (C_H ≥ 11.5，折合半衰期约 100 年)。具备同名幂等更新与历史重复条目自动清理能力。",
     inputSchema: {
       type: "object",
       properties: {
@@ -303,7 +303,7 @@ export const MCP_TOOLS = [
         },
         c_h: {
           type: "number",
-          description: "可选人基常度 C_H。默认 8.8 (约1~2周迭代周期)；若 tags 包含 config 或 cheatsheet 则自动升为 11.0 (约3年长期存根)。"
+          description: "可选人基常度 C_H (定义: C_H = log₁₀(半衰期/1ms))。默认 8.8 (约1~2周迭代周期)；若 tags 包含 config 或 cheatsheet 则自动升为 11.0 (约3年长期存根)。"
         },
         tags: {
           type: "array",
@@ -387,7 +387,7 @@ export const MCP_TOOLS = [
         },
         c_h: {
           type: "number",
-          description: "可选。更新人基常度 C_H。"
+          description: "可选。更新人基常度 C_H (定义: C_H = log₁₀(半衰期/1ms))。"
         }
       },
       required: ["id"]
@@ -432,7 +432,7 @@ export const MCP_TOOLS = [
         },
         c_h: {
           type: "number",
-          description: "可选。人基常度 C_H，默认 8.8。"
+          description: "可选。人基常度 C_H (定义: C_H = log₁₀(半衰期/1ms))，默认 8.8 (约1~2周)。"
         }
       }
     }
