@@ -1497,6 +1497,15 @@ export async function executeToolCall(
     const description = (args.description || "").trim();
     if (!description) throw new Error("Missing description");
 
+    // Validate that image actually exists in Cloudflare Images before saving to Qdrant
+    if (env.IMAGES?.hosted?.image) {
+      try {
+        await env.IMAGES.hosted.image(imageId).details();
+      } catch (err: any) {
+        throw new Error(`Cloudflare Images 中未找到 ID '${imageId}'，请核对 request_image_upload 返回的真实 image_id: ${err?.message || err}`);
+      }
+    }
+
     const title = (args.title || "").trim();
     const filename = (args.filename || "image.jpg").trim();
     const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
