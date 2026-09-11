@@ -222,8 +222,21 @@ export async function handleBlobRequest(
     const base64 = uint8ArrayToBase64(uint8);
     const sha256 = await computeBufferSha256(arrayBuffer);
 
-    let mimeType = request.headers.get("content-type") || "";
-    if (!mimeType || mimeType === "application/octet-stream") {
+    // Resolve authoritative MIME type:
+    // 1. Prefer explicitly declared mime_type from create_upload_url
+    // 2. Strictly filter out curl's default 'application/x-www-form-urlencoded' artifact
+    const rawHeaderType = (request.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const isGenericOrForm = !rawHeaderType || 
+      rawHeaderType === "application/octet-stream" || 
+      rawHeaderType === "application/x-www-form-urlencoded" ||
+      rawHeaderType === "multipart/form-data";
+
+    let mimeType: string;
+    if (point.payload.mime_type && point.payload.mime_type !== "application/octet-stream") {
+      mimeType = point.payload.mime_type;
+    } else if (!isGenericOrForm) {
+      mimeType = rawHeaderType;
+    } else {
       mimeType = point.payload.mime_type || "application/octet-stream";
     }
 
