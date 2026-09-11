@@ -9,9 +9,10 @@ export interface AuthEnv {
   CONSTANCY_KV: KVNamespace;
   ALLOWED_EMAILS?: string;
   ADMIN_PASSKEY?: string;
+  USER_PASSKEYS?: string; // Optional JSON mapping: {"user@example.com": "secret_passkey"}
 }
 
-// 1. Helpers for base64url, HMAC-SHA256 JWT, and HTML escaping
+// 1. Helpers for base64url, HMAC-SHA256 JWT, timing-safe equality, and HTML escaping
 function escapeHtml(str: string | null | undefined): string {
   if (!str) return "";
   return String(str)
@@ -20,6 +21,17 @@ function escapeHtml(str: string | null | undefined): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+async function timingSafeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const hashA = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(a)));
+  const hashB = new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(b)));
+  let diff = 0;
+  for (let i = 0; i < hashA.length; i++) {
+    diff |= hashA[i] ^ hashB[i];
+  }
+  return diff === 0;
 }
 
 function base64UrlEncode(str: string): string {
@@ -174,7 +186,7 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
   }
 
   // Function to render the authorization card with XSS protection
-  const renderCard = (errorMessage?: string) => {
+  const renderCard = (errorMessage?: string, statusCode = errorMessage ? 401 : 200) => {
     const errorBanner = errorMessage
       ? `<div style="background:#450a0a;border:1px solid #ef4444;color:#fca5a5;padding:0.75rem 1rem;border-radius:0.5rem;margin-bottom:1.25rem;font-size:0.9rem;">${escapeHtml(errorMessage)}</div>`
       : "";
@@ -201,7 +213,7 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
 <body>
   <div class="card">
     <h2>🧬 Constancy MCP</h2>
-    <p>Claude 请求连接到您的<b>人基常热认知外脑 (ACTD)</b>。<br>请输入管理员邮箱与授权口令完成单设备 1 年免密连接：</p>
+    <p>Claude 请求连接到您的<b>人基常热认知外脑 (ACTD)</b>。<br>请输入授权邮箱与专属口令完成单设备 1 年免密连接：</p>
     ${errorBanner}
     <form method="POST" action="/oauth2/authorize">
       <input type="hidden" name="client_id" value="${escapeHtml(clientId)}">
@@ -210,11 +222,11 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
       <input type="hidden" name="code_challenge" value="${escapeHtml(codeChallenge)}">
       <input type="hidden" name="code_challenge_method" value="${escapeHtml(codeChallengeMethod)}">
       <div class="field">
-        <label>管理员邮箱 (Admin Email)</label>
-        <input type="email" name="email" value="${escapeHtml(submittedEmail)}" placeholder="edwin.abel.3@gmail.com" required autofocus>
+        <label>授权邮箱 (Email)</label>
+        <input type="email" name="email" value="${escapeHtml(submittedEmail)}" placeholder="your-email@example.com" required autofocus>
       </div>
       <div class="field">
-        <label>授权口令 (Admin Passkey)</label>
+        <label>授权口令 (Passkey)</label>
         <input type="password" name="passkey" placeholder="请输入系统预设口令" required>
       </div>
       <button type="submit">授权连接 Claude (1 年免密)</button>
@@ -223,37 +235,81 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
 </body>
 </html>`;
     return new Response(html, {
-      status: errorMessage ? 401 : 200,
+      status: statusCode,
       headers: { "Content-Type": "text/html; charset=utf-8" }
     });
   };
+
+  // Fail-closed system configuration check: If required secrets are missing, immediately reject
+  if ((!env.ADMIN_PASSKEY && !env.USER_PASSKEYS) || !env.ALLOWED_EMAILS || !env.JWT_SECRET) {
+    return renderCard("❌ 系统安全配置缺失 (ADMIN_PASSKEY / ALLOWED_EMAILS / JWT_SECRET 未配置)，已触发安全锁定，拒绝任何授权请求。", 500);
+  }
 
   // If GET request, display authentication form directly (unauthenticated query param bypass is completely eliminated)
   if (!isPostSubmission) {
     return renderCard();
   }
 
-  // POST Submission Verification
-  // 1. Verify Passkey
-  if (env.ADMIN_PASSKEY) {
-    if (!submittedPasskey || submittedPasskey !== env.ADMIN_PASSKEY) {
-      return renderCard("❌ 授权口令 (Passkey) 错误，拒绝颁发访问令牌。");
-    }
+  // Rate Limiting (Anti-Brute-Force against credential stuffing)
+  const clientIp = request.headers.get("cf-connecting-ip") || "unknown";
+  const ipRlKey = `ratelimit:auth:ip:${clientIp}`;
+  const ipAttemptsRaw = await env.CONSTANCY_KV.get(ipRlKey);
+  const ipAttempts = ipAttemptsRaw ? parseInt(ipAttemptsRaw, 10) : 0;
+
+  if (ipAttempts >= 5) {
+    return renderCard("❌ 授权尝试失败次数过多，当前 IP 已被安全锁定，请 10 分钟后再试。", 429);
   }
 
-  // 2. Verify Email Whitelist
+  const recordFailure = async (reason: string) => {
+    const nextAttempts = ipAttempts + 1;
+    await env.CONSTANCY_KV.put(ipRlKey, nextAttempts.toString(), { expirationTtl: 600 });
+    const remaining = Math.max(0, 5 - nextAttempts);
+    return renderCard(`❌ ${reason}（该 IP 剩余尝试次数：${remaining} 次）`, 401);
+  };
+
+  // 1. Verify Email format and Whitelist (Fail-closed)
   if (!submittedEmail) {
-    return renderCard("❌ 请输入有效的管理员邮箱。");
+    return recordFailure("请输入有效的授权邮箱。");
   }
 
-  if (env.ALLOWED_EMAILS) {
-    const whitelist = env.ALLOWED_EMAILS.split(",")
-      .map(e => e.trim().toLowerCase())
-      .filter(Boolean);
-    if (!whitelist.includes(submittedEmail)) {
-      return renderCard(`❌ 邮箱 "${submittedEmail}" 不在管理员白名单中，拒绝接入。`);
+  const whitelist = env.ALLOWED_EMAILS.split(",")
+    .map(e => e.trim().toLowerCase())
+    .filter(Boolean);
+  if (!whitelist.includes(submittedEmail)) {
+    return recordFailure(`邮箱 "${submittedEmail}" 不在授权白名单中，拒绝接入。`);
+  }
+
+  // 2. Determine Expected Passkey (Per-user passkeys take precedence over global ADMIN_PASSKEY)
+  let expectedPasskey: string | undefined = undefined;
+
+  if (env.USER_PASSKEYS) {
+    try {
+      const userMap = JSON.parse(env.USER_PASSKEYS);
+      if (typeof userMap === "object" && userMap !== null && userMap[submittedEmail]) {
+        expectedPasskey = String(userMap[submittedEmail]);
+      }
+    } catch (e) {
+      console.error("Failed to parse USER_PASSKEYS JSON:", e);
     }
   }
+
+  if (!expectedPasskey && env.ADMIN_PASSKEY) {
+    expectedPasskey = env.ADMIN_PASSKEY;
+  }
+
+  // Fail-closed if no passkey is defined for this user
+  if (!expectedPasskey) {
+    return recordFailure("未为该邮箱配置专属授权口令，拒绝接入。");
+  }
+
+  // 3. Timing-safe passkey verification
+  const isPasskeyValid = await timingSafeEqual(submittedPasskey, expectedPasskey);
+  if (!isPasskeyValid) {
+    return recordFailure("授权口令 (Passkey) 错误，拒绝颁发访问令牌。");
+  }
+
+  // Success: Clear rate limit counter for this IP
+  await env.CONSTANCY_KV.delete(ipRlKey);
 
   // Issue Authorization Code
   const code = "code_" + crypto.randomUUID().replace(/-/g, "");
@@ -320,12 +376,13 @@ export async function handleToken(request: Request, env: AuthEnv): Promise<Respo
 
     const userId = codeData.user_id;
 
-    // Check whitelist on token issuance
-    if (env.ALLOWED_EMAILS) {
-      const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
-      if (!whitelist.includes(userId.toLowerCase())) {
-        return new Response(JSON.stringify({ error: "access_denied", error_description: "User not in whitelist" }), { status: 403 });
-      }
+    // Fail-closed whitelist check on token issuance
+    if (!env.ALLOWED_EMAILS || !env.JWT_SECRET) {
+      return new Response(JSON.stringify({ error: "server_error", error_description: "Missing security configuration" }), { status: 500 });
+    }
+    const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+    if (!whitelist.includes(userId.toLowerCase())) {
+      return new Response(JSON.stringify({ error: "access_denied", error_description: "User not in whitelist" }), { status: 403 });
     }
 
     // Issue 1-Year Access Token (31,536,000 seconds)
@@ -362,13 +419,14 @@ export async function handleToken(request: Request, env: AuthEnv): Promise<Respo
       return new Response(JSON.stringify({ error: "invalid_grant", error_description: "Invalid refresh token" }), { status: 400 });
     }
 
-    // Check whitelist on token renewal
-    if (env.ALLOWED_EMAILS) {
-      const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
-      if (!whitelist.includes(userId.toLowerCase())) {
-        await env.CONSTANCY_KV.delete(`refresh:${refreshToken}`);
-        return new Response(JSON.stringify({ error: "access_denied", error_description: "User revoked or not in whitelist" }), { status: 403 });
-      }
+    // Fail-closed whitelist check on token renewal
+    if (!env.ALLOWED_EMAILS || !env.JWT_SECRET) {
+      return new Response(JSON.stringify({ error: "server_error", error_description: "Missing security configuration" }), { status: 500 });
+    }
+    const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+    if (!whitelist.includes(userId.toLowerCase())) {
+      await env.CONSTANCY_KV.delete(`refresh:${refreshToken}`);
+      return new Response(JSON.stringify({ error: "access_denied", error_description: "User revoked or not in whitelist" }), { status: 403 });
     }
 
     const expiresIn = 31536000;
@@ -397,6 +455,11 @@ export async function handleToken(request: Request, env: AuthEnv): Promise<Respo
 
 // 6. Token Verification Middleware
 export async function authenticateRequest(request: Request, env: AuthEnv): Promise<string | null> {
+  // Fail-closed: missing security configuration denies all access
+  if (!env.JWT_SECRET || !env.ALLOWED_EMAILS) {
+    return null;
+  }
+
   const authHeader = request.headers.get("authorization") || "";
   let token = "";
 
@@ -412,12 +475,10 @@ export async function authenticateRequest(request: Request, env: AuthEnv): Promi
   const payload = await verifyJwt(token, env.JWT_SECRET);
   if (!payload || !payload.sub) return null;
 
-  // Real-time Whitelist Enforcement on EVERY request
-  if (env.ALLOWED_EMAILS) {
-    const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
-    if (!whitelist.includes((payload.sub as string).toLowerCase().trim())) {
-      return null;
-    }
+  // Real-time Whitelist Enforcement on EVERY request (Fail-closed)
+  const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+  if (!whitelist.includes((payload.sub as string).toLowerCase().trim())) {
+    return null;
   }
 
   return payload.sub as string;
