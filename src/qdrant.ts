@@ -181,3 +181,62 @@ export async function setPointPayload(
     throw new Error(`Qdrant setPointPayload error (${res.status}): ${errText}`);
   }
 }
+
+export async function scrollNotes(
+  userId: string,
+  tag?: string,
+  limit: number = 20,
+  includeRetired: boolean = false,
+  env: QdrantEnv = {} as any
+): Promise<Array<{ id: string; payload: MemoryPointPayload }>> {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/scroll`;
+
+  const mustFilters: any[] = [
+    { key: "user_id", match: { value: userId } },
+    { key: "type", match: { value: "note" } }
+  ];
+
+  if (tag && tag.trim()) {
+    mustFilters.push({ key: "tags", match: { value: tag.trim() } });
+  }
+
+  const filterBody: any = {
+    must: mustFilters
+  };
+
+  if (!includeRetired) {
+    filterBody.must_not = [
+      { key: "retired", match: { value: true } }
+    ];
+  }
+
+  const fetchLimit = Math.min(Math.max(limit * 3, 50), 200);
+
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: fetchLimit,
+      with_payload: true,
+      with_vector: false,
+      filter: filterBody
+    })
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Qdrant scrollNotes error (${res.status}): ${errText}`);
+  }
+
+  const data: any = await res.json();
+  const points: Array<{ id: string; payload: MemoryPointPayload }> = data.result?.points || [];
+
+  // Sort by timestamp descending (newest notes first)
+  points.sort((a, b) => {
+    const tA = new Date(a.payload?.timestamp || 0).getTime();
+    const tB = new Date(b.payload?.timestamp || 0).getTime();
+    return tB - tA;
+  });
+
+  return points.slice(0, limit);
+}
+

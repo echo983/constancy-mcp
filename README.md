@@ -91,9 +91,17 @@ graph TD
 6. `upsert_entity(name, description, aliases?, relations?)`  
    * 维护跨越周期的高阶常青实体百科清单 ($C_H \ge 11.0$)。
 7. `save_note(content, title?, base64?, mime_type?, c_h?, tags?)`  
-   * **极简记事本/客观存根**：专为“书记官记录”（用户交代“帮我记着点……”）与“LLM 工具性存根”（URI、代码片段、数据指纹）设计，原汁原味保存（上限 10KB），绝不作有损改写。支持可选的独立 BASE64 槽（上限 10KB，不参与向量化，零语义污染），常度与标签由调用者自由管理。
+   * **极简记事本/客观存根**：专为“书记官记录”（用户交代“帮我记着点……”）与“LLM 工具性存根”（URI、代码片段、数据指纹）设计，原汁原味保存（上限 10KB），绝不作有损改写。支持可选的独立 BASE64 槽（上限 10KB，不参与向量化，自动计算服务端 SHA-256 校验和），默认常度 8.8（配置/速查类自动为 11.0）。
 8. `get_note(id)`  
-   * **按需载荷提取**：根据便签 ID 精确取回完整原始内容及完整的 Base64 二进制载荷。检索时仅输出 `has_base64` 摘要，避免大体积数据挤占上下文，需要使用数据时按需调用。
+   * **按需载荷与审计追溯**：根据便签 ID 精确取回完整原始内容、Base64 载荷、SHA-256 校验和及历史修改审计链 (`revisions`)。
+9. `list_notes(tag?, limit?, include_retired?)`  
+   * **确定性标签枚举**：基于 Qdrant scroll 物理枚举便签与客观存根（非向量相似度检索，杜绝阈值截断漏选）。适用于“我有哪些待办”、“列出所有配置存根”等枚举场景。
+10. `update_note(id, content?, mode?, title?, tags?, base64?, mime_type?, c_h?)`  
+    * **版本可追溯编辑**：修改便签内容（支持覆盖与追加模式）、分类标签或常度。修改时自动归档历史版本快照至 `revisions` 审计链（最多保留 5 版）；内容或标题改动时自动触发 Voyage-3 重算语义向量。
+11. `get_blob_url(id)`  
+    * **Capability 下载链接生成**：为便签中存储的二进制数据生成 5 分钟带签名下载链接。供客户端或 Claude 代码沙箱通过 `curl` 直接下载，完全避免大段 Base64 经过 LLM 对话上下文消耗 Token 或产生截断转义损耗。
+12. `create_upload_url(title?, content?, mime_type?, tags?, c_h?)`  
+    * **Capability 直传链接生成**：预分配便签 ID 并生成 5 分钟带签名直接上传链接。允许客户端或 Claude 沙箱通过 `curl -X PUT` 直接将二进制流存入，完全不经过 LLM 对话上下文传输 Base64。
 
 ---
 

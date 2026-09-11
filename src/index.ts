@@ -13,6 +13,7 @@ import {
   authenticateRequest
 } from "./auth";
 import { handleMcpJsonRpc, McpEnv } from "./mcp";
+import { handleBlobRequest } from "./blob";
 
 export interface Env extends AuthEnv, McpEnv {
   QDRANT_API_KEY: string;
@@ -20,7 +21,7 @@ export interface Env extends AuthEnv, McpEnv {
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, Mcp-Session-Id"
 };
 
@@ -150,7 +151,13 @@ export default {
       return jsonResponse(responseJson || {});
     }
 
-    // 5. System Health Check (/api/health)
+    // 5. Binary Capability Transfer Endpoints (/blob/:id)
+    if (url.pathname.startsWith("/blob/")) {
+      const blobId = url.pathname.slice("/blob/".length);
+      return handleBlobRequest(request, blobId, env);
+    }
+
+    // 6. System Health Check (/api/health)
     if (url.pathname === "/api/health") {
       return jsonResponse({
         status: "healthy",
@@ -161,7 +168,7 @@ export default {
       });
     }
 
-    // 6. Homepage / Server Status Dashboard
+    // 7. Homepage / Server Status Dashboard
     if (url.pathname === "/" || url.pathname === "/index.html") {
       const html = `<!DOCTYPE html>
 <html>
@@ -198,8 +205,9 @@ https://${domain}/sse (Legacy SSE)</pre>
 
     <h3>内置核心工具 (Tools)</h3>
     <ul>
-      <li><b>log_memory</b>: 写入认知碎片，自动维护 7 维时间能量谱与 C_H 常度寿命</li>
-      <li><b>search_memory</b>: 连续懒衰减 + 共振 V 值时效仲裁（带 [🟢确信有效] / [🟡临界待核实] 标签）</li>
+      <li><b>log_memory / search_memory</b>: 认知碎片提炼与 ACTD 时效仲裁检索</li>
+      <li><b>save_note / get_note / list_notes / update_note</b>: 极简便签记事本、标签枚举待办与版本审计</li>
+      <li><b>get_blob_url / create_upload_url</b>: S3 风格 Capability 直传直下，沙箱零 Token 传输二进制</li>
       <li><b>get_daily_timeline</b>: 提取某日时间线碎片，供大模型生成每日研发日记（DevLog）</li>
       <li><b>upsert_entity</b>: 维护跨周期核心实体百科清单（百年基石级 C_H ≥ 11）</li>
     </ul>

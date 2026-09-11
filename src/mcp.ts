@@ -11,7 +11,8 @@ import {
   computeEpistemicHealth,
   classifyHealth,
   EvaluatedMemory,
-  MemoryPointPayload
+  MemoryPointPayload,
+  NoteRevision
 } from "./actd";
 import { getEmbedding, VoyageEnv } from "./voyage";
 import {
@@ -21,10 +22,15 @@ import {
   updatePointSpectrum,
   getPointById,
   setPointPayload,
+  scrollNotes,
   QdrantEnv
 } from "./qdrant";
+import { computeBase64Sha256, generateBlobSig } from "./blob";
 
-export interface McpEnv extends VoyageEnv, QdrantEnv {}
+export interface McpEnv extends VoyageEnv, QdrantEnv {
+  JWT_SECRET: string;
+  DOMAIN: string;
+}
 
 export const MCP_TOOLS = [
   {
@@ -186,7 +192,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "save_note",
-    description: "【极简记事本/客观存根】当用户要求'帮我记着点...'、需要原汁原味记录一段备忘/代码/URI，或者 LLM 自身需要工具性准确存储数据片段时调用。内容原样忠实保存（上限 10KB），支持可选的独立 BASE64 槽（上限 10KB，不参与向量化）。常度与生命周期由调用者自由控制。",
+    description: "【极简记事本/客观存根】当用户要求'帮我记着点...'、需要原汁原味记录一段备忘/代码/URI，或者 LLM 自身需要工具性准确存储数据片段时调用。内容原样忠实保存（上限 10KB），支持可选的独立 BASE64 槽（上限 10KB，不参与向量化，自动计算服务端 SHA-256 校验和）。默认常度 8.8 (配置/速查类 11.0)。常度与生命周期由调用者自由控制。",
     inputSchema: {
       type: "object",
       properties: {
@@ -200,7 +206,7 @@ export const MCP_TOOLS = [
         },
         base64: {
           type: "string",
-          description: "可选。专属二进制载荷槽（如小图片/图标的 Base64 字符串、小数据指纹）。上限 10KB，不参与向量化，纯作为物理存根保留。"
+          description: "可选。专属二进制载荷槽（如小图片/图标的 Base64 字符串、小数据指纹）。上限 10KB，不参与向量化，自动计算服务端 SHA-256。"
         },
         mime_type: {
           type: "string",
@@ -208,12 +214,12 @@ export const MCP_TOOLS = [
         },
         c_h: {
           type: "number",
-          description: "可选人基常度 C_H。由 LLM 自由评估：7.8=短期临时便签; 8.8=本周待办; 11.0=长期常青存根。默认 11.0。"
+          description: "可选人基常度 C_H。默认 8.8 (约1~2周迭代周期)；若 tags 包含 config 或 cheatsheet 则自动升为 11.0 (约3年长期存根)。"
         },
         tags: {
           type: "array",
           items: { type: "string" },
-          description: "可选。自由分类/状态标签（例如 ['todo', 'config']，也可以打 ['已办', '存档', '过时']）"
+          description: "可选。自由分类/状态标签（例如 ['todo']、['config', 'ops']、['已办'] 等）"
         }
       },
       required: ["content"]
@@ -221,7 +227,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_note",
-    description: "按 ID 精确获取指定便签或存根的完整数据，包括完整的 Base64 二进制载荷。当 search_memory 检索发现 has_base64: true 且确实需要获取原始二进制数据时按需调用。",
+    description: "按 ID 精确获取指定便签或存根的完整数据，包括完整内容、Base64 载荷、SHA-256 校验和及历史修改审计链 (revisions)。当 search_memory 检索发现 has_base64: true 且确实需要获取原始二进制数据时按需调用。",
     inputSchema: {
       type: "object",
       properties: {
@@ -231,6 +237,115 @@ export const MCP_TOOLS = [
         }
       },
       required: ["id"]
+    }
+  },
+  {
+    name: "list_notes",
+    description: "【枚举列出便签/存根】确定性枚举用户的便签与存根（基于 Qdrant scroll，非向量相似度搜索，杜绝阈值截断漏选）。适用于'我有哪些待办'、'列出所有配置存根'等需求。按时间倒序排列。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tag: {
+          type: "string",
+          description: "可选。指定分类标签过滤（例如 'todo', 'config', 'dev', '已办' 等）。不传则列出所有便签。"
+        },
+        limit: {
+          type: "number",
+          description: "可选。返回数量限制，默认 20，最大 100。"
+        },
+        include_retired: {
+          type: "boolean",
+          description: "可选。是否包含已归档/废弃的便签。默认 false。"
+        }
+      }
+    }
+  },
+  {
+    name: "update_note",
+    description: "【编辑便签/更新存根】修改已有便签的内容、标题、标签或常度。内容改动时自动重新计算向量嵌入。系统自动保留历史版本（revisions 审计链，最多保留最近 5 版）。可用于将待办标签从 todo 更新为 已办，或追加新备忘。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "待更新的便签 ID (UUID)"
+        },
+        content: {
+          type: "string",
+          description: "可选。新的便签内容。当 mode 为 'replace' 时直接替换；为 'append' 时追加在原内容末尾（附换行）。上限 10KB。"
+        },
+        mode: {
+          type: "string",
+          enum: ["replace", "append"],
+          description: "可选。内容修改模式：'replace' (覆盖，默认) 或 'append' (追加)。"
+        },
+        title: {
+          type: "string",
+          description: "可选。更新简短标题或描述。"
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选。更新分类标签列表（例如将 ['todo'] 改为 ['已办']）。"
+        },
+        base64: {
+          type: "string",
+          description: "可选。更新 Base64 二进制载荷。上限 10KB。"
+        },
+        mime_type: {
+          type: "string",
+          description: "可选。更新 MIME 数据类型。"
+        },
+        c_h: {
+          type: "number",
+          description: "可选。更新人基常度 C_H。"
+        }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "get_blob_url",
+    description: "【生成二进制下载 Capability URL】为便签中存储的二进制数据生成具有短期时效（5分钟）的带签名直接下载链接。供客户端或 Claude 代码沙箱通过 curl 直接下载，完全避免大段 Base64 经过 LLM 对话上下文消耗 Token 或产生截断转义损耗。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "便签或存根的 ID (UUID)"
+        }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "create_upload_url",
+    description: "【生成二进制直传 Capability URL】预分配便签 ID 并生成具有短期时效（5分钟）的带签名直接上传链接。允许客户端或 Claude 代码沙箱通过 curl -X PUT 直接将二进制文件流上传存入，完全不经过 LLM 对话上下文传输 Base64。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "可选。便签简短标题或语义描述（例如'系统架构拓扑图'、'应用图标'）"
+        },
+        content: {
+          type: "string",
+          description: "可选。便签说明或文本附注。上限 10KB。"
+        },
+        mime_type: {
+          type: "string",
+          description: "可选。上传数据的 MIME 类型（例如 'image/png', 'application/json' 等，默认 'application/octet-stream'）"
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选。分类标签（例如 ['diagram', 'arch']）"
+        },
+        c_h: {
+          type: "number",
+          description: "可选。人基常度 C_H，默认 8.8。"
+        }
+      }
     }
   }
 ];
@@ -387,6 +502,7 @@ export async function executeToolCall(
           title: p.title || undefined,
           has_base64: Boolean(p.base64),
           base64_length: p.base64 ? p.base64.length : undefined,
+          sha256: p.sha256 || undefined,
           mime_type: p.mime_type || undefined
         });
       }
@@ -435,6 +551,7 @@ export async function executeToolCall(
           title: payload.title || undefined,
           has_base64: Boolean(payload.base64),
           base64_length: payload.base64 ? payload.base64.length : undefined,
+          sha256: payload.sha256 || undefined,
           mime_type: payload.mime_type || undefined
         });
         continue;
@@ -462,6 +579,7 @@ export async function executeToolCall(
         title: payload.title || undefined,
         has_base64: Boolean(payload.base64),
         base64_length: payload.base64 ? payload.base64.length : undefined,
+        sha256: payload.sha256 || undefined,
         mime_type: payload.mime_type || undefined
       });
     }
@@ -642,9 +760,20 @@ export async function executeToolCall(
     }
 
     const mimeType = (args.mime_type || "").trim();
-    const chPrior = typeof args.c_h === "number" ? args.c_h : 11.0;
     const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
     if (!tags.includes("note")) tags.push("note");
+
+    const hasConfigOrCheatsheet = tags.some(t => {
+      const lower = t.toLowerCase();
+      return lower.includes("config") || lower.includes("cheatsheet") || lower.includes("速查") || lower.includes("配置");
+    });
+    const defaultCh = hasConfigOrCheatsheet ? 11.0 : 8.8;
+    const chPrior = typeof args.c_h === "number" ? args.c_h : defaultCh;
+
+    let sha256: string | undefined = undefined;
+    if (base64) {
+      sha256 = await computeBase64Sha256(base64);
+    }
 
     // Pure semantic embedding: embed title + content, strictly omit base64
     const textToEmbed = title ? `${title}\n${content}` : content;
@@ -667,6 +796,7 @@ export async function executeToolCall(
       t_last_strong: nowMs,
       title: title || undefined,
       base64: base64 || undefined,
+      sha256: sha256 || undefined,
       mime_type: mimeType || undefined
     };
 
@@ -681,10 +811,11 @@ export async function executeToolCall(
       title: title || undefined,
       has_base64: Boolean(base64),
       base64_length: base64 ? base64.length : 0,
+      sha256: sha256 || undefined,
       mime_type: mimeType || undefined,
       tags,
       stable_expected: `约 ${expectedHours} 小时`,
-      message: `📝 已原样存入记事本 [ID: ${pointId}, 常度: ${chPrior}${base64 ? `, 附带 ${base64.length} 字符 BASE64 载荷` : ""}]`
+      message: `📝 已原样存入记事本 [ID: ${pointId}, 常度: ${chPrior}${sha256 ? `, SHA-256: ${sha256}` : ""}${base64 ? `, 附带 ${base64.length} 字符 BASE64 载荷` : ""}]`
     };
   }
 
@@ -707,13 +838,311 @@ export async function executeToolCall(
       base64: p.base64 || undefined,
       has_base64: Boolean(p.base64),
       base64_length: p.base64 ? p.base64.length : 0,
+      sha256: p.sha256 || undefined,
       mime_type: p.mime_type || undefined,
       tags: p.tags || [],
       c_h: p.ch_prior,
       timestamp: p.timestamp,
       date: p.date,
+      revisions: p.revisions || [],
       retired: Boolean(p.retired),
       retired_reason: p.retired_reason || undefined
+    };
+  }
+
+  // 9. Tool: list_notes
+  if (name === "list_notes") {
+    const tag = typeof args.tag === "string" ? args.tag.trim() : undefined;
+    const limit = Math.min(Math.max(typeof args.limit === "number" ? args.limit : 20, 1), 100);
+    const includeRetired = Boolean(args.include_retired);
+
+    const points = await scrollNotes(userId, tag, limit, includeRetired, env);
+    const results: any[] = [];
+
+    for (const pt of points) {
+      const p: MemoryPointPayload = pt.payload || ({} as any);
+      const isRetired = Boolean(p.retired);
+
+      if (isRetired) {
+        const classification = classifyHealth(0.0, p.tags || [], "note", true, p.retired_reason || "");
+        results.push({
+          id: pt.id,
+          title: p.title || undefined,
+          content: p.content,
+          tags: p.tags || [],
+          c_h: 0.0,
+          ch_dynamic: 0.0,
+          validity: 0.0,
+          status: classification.status,
+          status_badge: classification.badge,
+          prompt_guidance: classification.guidance,
+          timestamp: p.timestamp,
+          date: p.date,
+          has_base64: Boolean(p.base64),
+          base64_length: p.base64 ? p.base64.length : 0,
+          sha256: p.sha256 || undefined,
+          mime_type: p.mime_type || undefined,
+          revisions_count: Array.isArray(p.revisions) ? p.revisions.length : 0,
+          retired: true,
+          retired_reason: p.retired_reason
+        });
+        continue;
+      }
+
+      const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
+      const chDynamic = computeDynamicCh(p.ch_prior ?? 8.8, decayedH);
+      const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
+      const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
+      const classification = classifyHealth(V, p.tags || [], "note", false, "");
+
+      results.push({
+        id: pt.id,
+        title: p.title || undefined,
+        content: p.content,
+        tags: p.tags || [],
+        c_h: p.ch_prior ?? 8.8,
+        ch_dynamic: chDynamic,
+        validity: V,
+        status: classification.status,
+        status_badge: classification.badge,
+        prompt_guidance: classification.guidance,
+        timestamp: p.timestamp,
+        date: p.date,
+        has_base64: Boolean(p.base64),
+        base64_length: p.base64 ? p.base64.length : 0,
+        sha256: p.sha256 || undefined,
+        mime_type: p.mime_type || undefined,
+        revisions_count: Array.isArray(p.revisions) ? p.revisions.length : 0,
+        retired: false
+      });
+    }
+
+    return {
+      tag: tag || undefined,
+      found_count: results.length,
+      notes: results
+    };
+  }
+
+  // 10. Tool: update_note
+  if (name === "update_note") {
+    const pointId = (args.id || "").trim();
+    if (!pointId) throw new Error("Missing note id");
+
+    const point = await getPointById(pointId, env);
+    if (!point || !point.payload || point.payload.user_id !== userId) {
+      throw new Error(`Note '${pointId}' not found or unauthorized`);
+    }
+
+    const p = point.payload;
+    if (p.type !== "note") {
+      throw new Error(`Memory '${pointId}' is of type '${p.type}', not 'note'. Use appropriate memory tools to update.`);
+    }
+
+    // Save previous snapshot to revisions array
+    const previousSnapshot: NoteRevision = {
+      timestamp: now.toISOString(),
+      content: p.content,
+      title: p.title,
+      tags: p.tags ? [...p.tags] : [],
+      base64: p.base64,
+      mime_type: p.mime_type,
+      sha256: p.sha256
+    };
+
+    const revisions: NoteRevision[] = Array.isArray(p.revisions) ? [...p.revisions] : [];
+    revisions.push(previousSnapshot);
+    if (revisions.length > 5) {
+      revisions.splice(0, revisions.length - 5);
+    }
+
+    let contentChanged = false;
+    let newContent = p.content;
+    if (typeof args.content === "string") {
+      const inputContent = args.content.trim();
+      if (args.mode === "append") {
+        newContent = p.content ? `${p.content}\n${inputContent}` : inputContent;
+      } else {
+        newContent = inputContent;
+      }
+      if (!newContent) throw new Error("Content cannot be empty");
+      if (newContent.length > 10240) {
+        throw new Error(`content 超过 10KB 限制 (当前: ${newContent.length} 字符)。`);
+      }
+      if (newContent !== p.content) contentChanged = true;
+    }
+
+    let titleChanged = false;
+    let newTitle = p.title;
+    if (args.title !== undefined) {
+      newTitle = (args.title || "").trim() || undefined;
+      if (newTitle && newTitle.length > 256) {
+        throw new Error(`title 超过 256 字符限制 (当前: ${newTitle.length} 字符)。`);
+      }
+      if (newTitle !== p.title) titleChanged = true;
+    }
+
+    let newTags = p.tags || [];
+    if (Array.isArray(args.tags)) {
+      newTags = args.tags.map(t => String(t).trim()).filter(Boolean);
+      if (!newTags.includes("note")) newTags.push("note");
+    }
+
+    let newBase64 = p.base64;
+    let newSha256 = p.sha256;
+    let newMimeType = p.mime_type;
+
+    if (args.base64 !== undefined) {
+      newBase64 = (args.base64 || "").trim() || undefined;
+      if (newBase64 && newBase64.length > 10240) {
+        throw new Error(`base64 载荷超过 10KB 限制 (当前: ${newBase64.length} 字符)。`);
+      }
+      if (newBase64) {
+        newSha256 = await computeBase64Sha256(newBase64);
+      } else {
+        newSha256 = undefined;
+      }
+    }
+
+    if (args.mime_type !== undefined) {
+      newMimeType = (args.mime_type || "").trim() || undefined;
+    }
+
+    let newCh = p.ch_prior;
+    if (typeof args.c_h === "number") {
+      newCh = args.c_h;
+    }
+
+    // Update payload object
+    p.content = newContent;
+    p.title = newTitle;
+    p.tags = newTags;
+    p.base64 = newBase64;
+    p.sha256 = newSha256;
+    p.mime_type = newMimeType;
+    p.ch_prior = newCh;
+    p.revisions = revisions;
+    p.t_last_update = nowMs;
+
+    if (contentChanged || titleChanged) {
+      // Re-inject intent energy
+      const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
+      p.h_spectrum = injectIntent(decayedH, 1.0);
+      p.t_last_strong = nowMs;
+
+      // Re-vectorize
+      const textToEmbed = newTitle ? `${newTitle}\n${newContent}` : newContent;
+      const vector = await getEmbedding(textToEmbed, env, "document");
+      await upsertMemoryPoint(pointId, vector, p, env);
+    } else {
+      await setPointPayload(pointId, p, env);
+    }
+
+    return {
+      success: true,
+      id: pointId,
+      title: newTitle,
+      content: newContent,
+      tags: newTags,
+      c_h: newCh,
+      has_base64: Boolean(newBase64),
+      base64_length: newBase64 ? newBase64.length : 0,
+      sha256: newSha256,
+      mime_type: newMimeType,
+      revisions_count: revisions.length,
+      revectorized: contentChanged || titleChanged,
+      message: `📝 便签 [ID: ${pointId}] 更新成功 (历史版本数: ${revisions.length}${contentChanged || titleChanged ? "，已重算语义向量" : ""})`
+    };
+  }
+
+  // 11. Tool: get_blob_url
+  if (name === "get_blob_url") {
+    const pointId = (args.id || "").trim();
+    if (!pointId) throw new Error("Missing note id");
+
+    const point = await getPointById(pointId, env);
+    if (!point || !point.payload || point.payload.user_id !== userId) {
+      throw new Error(`Note '${pointId}' not found or unauthorized`);
+    }
+
+    const p = point.payload;
+    if (!p.base64) {
+      throw new Error(`Note '${pointId}' has no binary payload to download.`);
+    }
+
+    const exp = Math.floor(nowMs / 1000) + 300; // 5 minutes validity
+    const sig = await generateBlobSig("GET", pointId, userId, exp, env.JWT_SECRET);
+    const domain = env.DOMAIN || "mcp.kufof.uk";
+    const downloadUrl = `https://${domain}/blob/${pointId}?exp=${exp}&sig=${sig}`;
+
+    return {
+      success: true,
+      id: pointId,
+      title: p.title || undefined,
+      download_url: downloadUrl,
+      mime_type: p.mime_type || "application/octet-stream",
+      sha256: p.sha256 || undefined,
+      size_bytes: p.base64 ? Math.floor((p.base64.length * 3) / 4) : 0,
+      expires_at: new Date(exp * 1000).toISOString(),
+      curl_command: `curl -s -o attachment "${downloadUrl}"`
+    };
+  }
+
+  // 12. Tool: create_upload_url
+  if (name === "create_upload_url") {
+    const title = (args.title || "").trim();
+    if (title.length > 256) throw new Error("title exceeds 256 characters");
+
+    const content = (args.content || "").trim() || (title ? `[二进制存根] ${title}` : "（待上传二进制数据存根）");
+    if (content.length > 10240) throw new Error("content exceeds 10KB");
+
+    const mimeType = (args.mime_type || "").trim() || "application/octet-stream";
+    const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
+    if (!tags.includes("note")) tags.push("note");
+
+    const hasConfigOrCheatsheet = tags.some(t => {
+      const lower = t.toLowerCase();
+      return lower.includes("config") || lower.includes("cheatsheet") || lower.includes("速查") || lower.includes("配置");
+    });
+    const defaultCh = hasConfigOrCheatsheet ? 11.0 : 8.8;
+    const chPrior = typeof args.c_h === "number" ? args.c_h : defaultCh;
+
+    const pointId = crypto.randomUUID();
+    const textToEmbed = title ? `${title}\n${content}` : content;
+    const vector = await getEmbedding(textToEmbed, env, "document");
+
+    const initialSpectrum = injectIntent(new Array(7).fill(0), 1.0);
+    const payload: MemoryPointPayload = {
+      user_id: userId,
+      content,
+      timestamp: now.toISOString(),
+      date: todayStr,
+      type: "note",
+      entities: [],
+      tags,
+      ch_prior: chPrior,
+      h_spectrum: initialSpectrum,
+      t_last_update: nowMs,
+      t_last_strong: nowMs,
+      title: title || undefined,
+      mime_type: mimeType
+    };
+
+    await upsertMemoryPoint(pointId, vector, payload, env);
+
+    const exp = Math.floor(nowMs / 1000) + 300; // 5 minutes validity
+    const sig = await generateBlobSig("PUT", pointId, userId, exp, env.JWT_SECRET);
+    const domain = env.DOMAIN || "mcp.kufof.uk";
+    const uploadUrl = `https://${domain}/blob/${pointId}?exp=${exp}&sig=${sig}`;
+
+    return {
+      success: true,
+      id: pointId,
+      title: title || undefined,
+      upload_url: uploadUrl,
+      mime_type: mimeType,
+      expires_at: new Date(exp * 1000).toISOString(),
+      curl_command: `curl -X PUT -H "Content-Type: ${mimeType}" --data-binary @filename "${uploadUrl}"`
     };
   }
 

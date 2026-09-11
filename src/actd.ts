@@ -31,6 +31,18 @@ export interface MemoryPointPayload {
   title?: string;
   base64?: string;
   mime_type?: string;
+  sha256?: string;
+  revisions?: NoteRevision[];
+}
+
+export interface NoteRevision {
+  timestamp: string;      // ISO8601 when this snapshot was created/archived
+  content: string;
+  title?: string;
+  tags?: string[];
+  base64?: string;
+  mime_type?: string;
+  sha256?: string;
 }
 
 export type HealthStatus = "FRESH" | "DRIFTING" | "DORMANT";
@@ -61,6 +73,8 @@ export interface EvaluatedMemory {
   has_base64?: boolean;
   base64_length?: number;
   mime_type?: string;
+  sha256?: string;
+  revisions_count?: number;
 }
 
 /**
@@ -177,7 +191,7 @@ export function classifyHealth(
       return {
         status: "FRESH",
         badge: "📝 原始便签 (Raw Note / 存根)",
-        guidance: "这是用户或系统原样记录的便签/客观存根，保留了第一手原话与数据，可直接原样采信使用。"
+        guidance: "原样记录，保真可信；但环境类信息（地址、端口、版本）可能已变化，使用前视时效核实。"
       };
     } else if (V >= 0.2) {
       return {
