@@ -60,12 +60,15 @@ $$t_{\text{last}} \leftarrow t_{\text{now}}$$
 
 $$h_k \leftarrow h_k + w \cdot \exp(-\lambda \cdot s_k) \quad (\lambda = 0.5)$$
 
-* **事件权重规范**：
-  * 强操作（`open`, `execute`, `verify_confirmed`）：$w = 1.0$
-  * 搜索命中并采纳（`search_hit_adopt`）：$w = 0.8$
-  * 浏览与预览（`preview`, `peek`）：$w = 0.4$
-  * 浅层关联暴露（`reveal`, `list`）：$w = 0.2$
-* **时间戳更新**：若为强操作，同步更新强验证时间戳 $t_{\text{last\_strong}} \leftarrow t_{\text{now}}$。
+* **事件分类与防自热回音室规范 (Anti-Echo Chamber Axiom)**：
+  * ⚠️ **核心公理：被动检索绝不等于现实确证（Retrieval $\neq$ Affirmation）**。
+  * **弱信号（被动检索探针 / Passive Read Probe）**：
+    * 仅触发工作记忆激发（$s=0$，半衰期 1 分钟，10 分钟注意力衰竭）。
+    * **长波通道（$k \ge 3$）绝对免疫**：零注入，动态常度 $C_H^{\text{dynamic}}$ 保持先验值，绝不虚假自热膨胀。
+    * **严禁更新** 强验证时间戳 $t_{\text{last\_strong}}$；**不回写** 向量数据库，消灭写放大与幽灵诈尸后门。
+  * **强信号（主动写入 / 现实确证 / 跨周期蒸馏 / Active Affirmation）**：
+    * 触发场景：`log_memory`、`upsert_entity`、夜间蒸馏固化、显式重申确认。
+    * 允许跨尺度敏感核全谱系能量注入，同步更新 $t_{\text{last\_strong}} \leftarrow t_{\text{now}}$，驱动合法常度跃迁。
 
 ---
 

@@ -44,6 +44,7 @@ $$C_H = s + \log_{10}(60,000) \approx \mathbf{s + 4.78}$$
 | **5** | $5$ | 2.3 个月 | $\approx 9.78$ | **演进阶段** | 架构选型、接口标准稳定期 |
 | **6** | $6$ | 2 年 | $\approx 10.78$ | **常青底噪** | 核心实体百科、硬件物理参数 |
 
+> 💡 **标尺映射说明**：7 维谱系最大追踪通道 $s=6$ 对应半衰期约 2 年 ($C_H \approx 10.78$)，作为日常动力学的最长意图载波。对于长期架构规范或硬件基石实体 ($C_H \ge 11.0$，如 10 年期实体 $C_H = 11.5$)，其热度载波锚定在通道 6，其有效时效衰减 $\tau = 10^{C_H}$ 严格遵循物理基石先验。  
 > 完整形式化推导请参阅 [docs/ACTD_SPEC.md](docs/ACTD_SPEC.md) 与 [docs/THEORY.md](docs/THEORY.md)。
 
 ---
@@ -53,6 +54,8 @@ $$C_H = s + \log_{10}(60,000) \approx \mathbf{s + 4.78}$$
 通过常度频段共振提取有效热度 $H_{\text{eff}}$，计算命题的时效健康度 $V$：
 
 $$V(t) = \exp\left( - \frac{\text{ms}(t_{\text{now}} - t_{\text{last\_strong}})}{10^{C_H^{\text{dynamic}}}} \cdot \frac{1}{1 + \ln(1 + H_{\text{eff}})} \right)$$
+
+* **核心防自热公理（被动检索 $\neq$ 现实确证）**：AI 发起 `search_memory` 仅作为弱信号探针，仅激发短暂工作记忆 ($s=0$)，绝不泄漏至长波通道，严禁凭空拉高 $C_H$，从数学上根除“频繁被搜导致陈旧记忆永不衰减”的幽灵诈尸后门。
 
 大模型在检索记忆时，不再是冷冰冰地提取旧文本，而是获得清晰的**行动决策指南**：
 
@@ -77,12 +80,12 @@ graph TD
 
 1. `log_memory(content, c_h?, type?, entities?, tags?)`  
    * 主动打点记事。不记闲聊废话，只存高信噪比事实或阶段性决策。
-2. `search_memory(query, limit?, min_validity?)`  
-   * 语义检索 + ACTD 时效仲裁，返回带情商指示牌的记忆卡片。
+2. `search_memory(query, limit?, type?, entity?, min_validity?)`  
+   * 语义检索 + ACTD 连续懒衰减时效仲裁，返回带情商指示牌与动力学指标的记忆卡片。默认过滤 $V < 0.2$ 的沉淀态。
 3. `get_daily_timeline(date)`  
-   * 按时间顺序提取某一天全部碎片，供大模型生成每日研发日记（DevLog）。
+   * 按时间顺序提取某一天全部碎片与动力学热度指标 ($C_H$、健康度 $V$、状态标签)，供大模型生成每日研发日记（DevLog）与夜间蒸馏。
 4. `upsert_entity(name, description, aliases?, relations?)`  
-   * 维护跨越周期的高常度核心实体百科清单。
+   * 维护跨越周期的高阶常青实体百科清单 ($C_H \ge 11.0$)。
 
 ---
 
@@ -92,7 +95,7 @@ graph TD
 graph LR
     Day["白天：主动记录碎片<br>(C_H ≈ 8~9, 高频通道)"] 
     -->|夜间整理日记| Night["每日日记 DevLog<br>(C_H ≈ 10.5, 中频通道)"] 
-    -->|长波能量共振| Entity["核心实体清单<br>(C_H ≥ 12.5, 跨周期常青)"]
+    -->|长波能量共振| Entity["核心实体清单<br>(C_H ≥ 11.0, 长期常青基石)"]
     
     Day -.->|未获长波能量支撑| Evaporate["根据半衰期自动遗忘蒸发 (抗熵新陈代谢)"]
 ```
@@ -104,7 +107,8 @@ graph LR
 - [x] 《人基常度》形式化理论定义与标尺 ([docs/THEORY.md](docs/THEORY.md))
 - [x] 《人基常热动力学 ACTD v1.0》统一规范 ([docs/ACTD_SPEC.md](docs/ACTD_SPEC.md))
 - [x] 数学自洽性审计与 4 大典型/极端场景全推演 ([docs/VERIFICATION.md](docs/VERIFICATION.md))
-- [ ] 基于 Qdrant + Cloudflare Worker 的边缘向量与 ACTD 算法引擎
+- [x] 基于 Qdrant + Cloudflare Worker 的边缘向量与 ACTD 算法引擎
+- [x] OAuth 2.1 RFC 8414 + 1 年免密动态注册 (Claude Custom Connectors 支持)
 - [ ] 官方 TypeScript / Python 本地 MCP Server 实现
 - [ ] Claude Desktop / Cursor / Antigravity 一键安装配置指南
 - [ ] 自动化每日日记提取与实体清单蒸馏 Prompt 模版

@@ -6,6 +6,7 @@ import {
   S_AXIS,
   decaySpectrum,
   injectIntent,
+  exciteWorkingMemory,
   computeDynamicCh,
   interpolateResonantHeat,
   computeEpistemicHealth,
@@ -74,11 +75,15 @@ export const MCP_TOOLS = [
         },
         type: {
           type: "string",
-          description: "限定类型过滤 (可选)"
+          description: "限定类型过滤 (可选，如 insight, decision, event, entity, memo)"
         },
         entity: {
           type: "string",
           description: "限定实体过滤 (可选)"
+        },
+        min_validity: {
+          type: "number",
+          description: "时效健康度 V 门槛 (0.0 ~ 1.0)。默认 0.2 (自动过滤 ⚪ 蒸发态/Dormant 记忆；设为 0.7 可仅查看 🟢 确信有效)"
         }
       },
       required: ["query"]
@@ -86,7 +91,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_daily_timeline",
-    description: "按时间顺序提取指定日期的全部记忆碎片，用于自动化生成每日研发日记（DevLog）或工作复盘。",
+    description: "按时间顺序提取指定日期的全部记忆碎片，包含常度 C_H、热度与时效健康状态，用于自动化生成每日研发日记（DevLog）或工作复盘。",
     inputSchema: {
       type: "object",
       properties: {
@@ -100,7 +105,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "upsert_entity",
-    description: "登记或更新跨越周期的核心实体百科（如硬件参数、系统架构组件、团队规范），赋予高阶基石常度 (C_H >= 11)。",
+    description: "登记或更新跨越周期的核心实体百科（如硬件参数、系统架构组件、团队规范），赋予高阶基石常度 (C_H ≥ 11.0, 长期常青基石)。",
     inputSchema: {
       type: "object",
       properties: {
@@ -188,6 +193,7 @@ export async function executeToolCall(
     const query = (args.query || "").trim();
     if (!query) throw new Error("Missing query");
     const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
+    const minValidity = typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2;
 
     const queryVector = await getEmbedding(query, env, "query");
     const candidates = await searchMemoryPoints(queryVector, userId, limit * 3, env, {
@@ -201,27 +207,28 @@ export async function executeToolCall(
       const p: MemoryPointPayload = item.payload;
       if (!p) continue;
 
-      // 1. Apply Lazy Decay
+      // 1. Continuous Lazy Decay from last persistent update to now
       const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
       
-      // 2. Inject retrieval intent energy
-      const updatedH = injectIntent(decayedH, 0.8);
+      // 2. Weak Signal (Passive Search Probe):
+      // Only excite short-wave working memory (s=0, 10-minute focus window)
+      // Zero long-wave penetration (k >= 3), strictly preventing artificial C_H inflation
+      const activeH = exciteWorkingMemory(decayedH, 0.4);
 
       // 3. Compute dynamic C_H and resonant heat
-      const chDynamic = computeDynamicCh(p.ch_prior || 9.0, updatedH);
-      const resonantHeat = interpolateResonantHeat(updatedH, chDynamic);
+      // Dynamic C_H remains tied to genuine long-wave consolidation, immune to read probes
+      const chDynamic = computeDynamicCh(p.ch_prior || 9.0, decayedH);
+      const resonantHeat = interpolateResonantHeat(activeH, chDynamic);
 
-      // 4. Compute Epistemic Health V
+      // 4. Compute Epistemic Health V (t_last_strong is NEVER updated by passive search)
       const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
       const classification = classifyHealth(V);
 
-      // 5. Update point spectrum in background (async non-blocking)
-      if (ctx) {
-        ctx.waitUntil(updatePointSpectrum(item.id, updatedH, nowMs, false, env));
-      }
+      // Note: Passive search does NOT write back to persistent Qdrant!
+      // This eliminates write amplification and prevents the "Ghost Resuscitation" feedback loop.
 
-      // 6. Filter out DORMANT memories (V < 0.2)
-      if (classification.status !== "DORMANT") {
+      // 5. Filter by min_validity threshold (default >= 0.2, discarding DORMANT)
+      if (V >= minValidity) {
         evaluatedList.push({
           id: item.id,
           content: p.content,
@@ -241,7 +248,7 @@ export async function executeToolCall(
       }
     }
 
-    // Sort by weighted composite score
+    // Sort by Epistemic Health V descending
     evaluatedList.sort((a, b) => b.validity - a.validity);
     const results = evaluatedList.slice(0, limit);
 
@@ -257,20 +264,35 @@ export async function executeToolCall(
     const date = (args.date || todayStr).trim();
     const points = await getTimelinePoints(userId, date, env);
 
-    const timeline = points.map((p: any) => ({
-      id: p.id,
-      time: p.payload?.timestamp ? new Date(p.payload.timestamp).toLocaleTimeString() : "",
-      timestamp: p.payload?.timestamp,
-      type: p.payload?.type,
-      entities: p.payload?.entities || [],
-      content: p.payload?.content
-    }));
+    const timeline = points.map((p: any) => {
+      const payload: MemoryPointPayload = p.payload || {};
+      const decayedH = decaySpectrum(payload.h_spectrum || new Array(7).fill(0), payload.t_last_update || nowMs, nowMs);
+      const chDynamic = computeDynamicCh(payload.ch_prior || 9.0, decayedH);
+      const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
+      const V = computeEpistemicHealth(chDynamic, resonantHeat, payload.t_last_strong || nowMs, nowMs);
+      const classification = classifyHealth(V);
+
+      return {
+        id: p.id,
+        time: payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString("zh-CN", { hour12: false }) : "",
+        timestamp: payload.timestamp,
+        type: payload.type,
+        entities: payload.entities || [],
+        content: payload.content,
+        c_h: payload.ch_prior,
+        ch_dynamic: chDynamic,
+        resonant_heat: Number(resonantHeat.toFixed(2)),
+        validity: V,
+        status: classification.status,
+        status_badge: classification.badge
+      };
+    });
 
     return {
       date,
       count: timeline.length,
       timeline,
-      prompt_hint: "请参考上述时间线碎片，提炼并生成结构清晰的每日研发日记（DevLog），并识别当天值得沉淀的高价值常青实体。"
+      prompt_hint: "请参考上述时间线碎片与常热动力学指标 (c_h, validity, status_badge)，提炼并生成结构清晰的每日研发日记（DevLog），并识别当天值得沉淀的高价值常青实体。"
     };
   }
 

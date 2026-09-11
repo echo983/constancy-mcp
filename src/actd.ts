@@ -62,7 +62,8 @@ export function decaySpectrum(
 }
 
 /**
- * Injects intent energy across scales using scale-sensitive kernel
+ * Injects intent energy across scales using scale-sensitive kernel (Strong Signal)
+ * Used for log_memory, upsert_entity, or explicit human/agent active affirmation.
  */
 export function injectIntent(
   h: number[],
@@ -73,6 +74,17 @@ export function injectIntent(
     const scaleKernel = Math.exp(-lambda * S_AXIS[k]);
     return val + weight * scaleKernel;
   });
+}
+
+/**
+ * Excites transient working memory for passive retrieval probes (Weak Signal)
+ * Only impacts s=0 (1-minute half-life, 10-minute attention span).
+ * Strictly zero leakage into long-wave channels (k >= 3), preventing artificial C_H inflation.
+ */
+export function exciteWorkingMemory(h: number[], weight: number = 0.5): number[] {
+  const next = [...h];
+  next[0] = (next[0] || 0) + weight;
+  return next;
 }
 
 /**
