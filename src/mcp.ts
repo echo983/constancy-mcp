@@ -31,7 +31,28 @@ import { computeBase64Sha256, generateBlobSig } from "./blob";
 
 export const CF_IMAGE_DELIVERY_HASH = "uTkE-E-smfahZbJoOmXVCw";
 
-export function getImageVariants(imageId: string) {
+export async function getSignedImageVariants(
+  imageId: string,
+  env: McpEnv,
+  expiresIn: number = 7200
+): Promise<{ public: string; ai1024: string; ai768: string; ai512: string }> {
+  // If native Cloudflare Images binding is available, generate signed URLs
+  if (env.IMAGES?.hosted?.image) {
+    try {
+      const handle = env.IMAGES.hosted.image(imageId);
+      const [pub, ai1024, ai768, ai512] = await Promise.all([
+        handle.signedUrl({ variant: "public", expiresIn }),
+        handle.signedUrl({ variant: "ai1024", expiresIn }),
+        handle.signedUrl({ variant: "ai768", expiresIn }),
+        handle.signedUrl({ variant: "ai512", expiresIn })
+      ]);
+      return { public: pub, ai1024, ai768, ai512 };
+    } catch (err) {
+      console.error("IMAGES.hosted.image signedUrl error:", err);
+    }
+  }
+
+  // Fallback to basic delivery paths if binding not initialized
   const base = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imageId}`;
   return {
     public: `${base}/public`,
@@ -41,13 +62,14 @@ export function getImageVariants(imageId: string) {
   };
 }
 
-export const AI_VISION_VARIANT_GUIDE = "视觉模型传图分辨率指引：1) 密集文本/架构图/复杂图表选 ai1024；2) 通用场景/日常照片理解选 ai768（推荐默认，精度与Token开销平衡）；3) 快速识别/粗粒度分类选 ai512（极低Token）；4) 用户查看或下载提供 public。";
+export const AI_VISION_VARIANT_GUIDE = "视觉模型传图分辨率指引：1) 密集文本/架构图/复杂图表选 ai1024；2) 通用场景/日常照片理解选 ai768（推荐默认，精度与Token开销平衡）；3) 快速识别/粗粒度分类选 ai512（极低Token）；4) 用户查看或下载提供 public。所有链接均具备时间签名保护。";
 
 export interface McpEnv extends VoyageEnv, QdrantEnv {
   JWT_SECRET: string;
   DOMAIN: string;
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
+  IMAGES?: any;
 }
 
 export const MCP_TOOLS = [
@@ -624,11 +646,11 @@ export async function executeToolCall(
     evaluatedList.sort((a, b) => (b.composite_score || 0) - (a.composite_score || 0));
     const memoryResults = evaluatedList.slice(0, limit);
 
-    // Format visual image results with ready-to-use CDN URLs and curl commands
-    const imageResults = (imageCandidates || []).map(item => {
+    // Format visual image results with ready-to-use signed CDN URLs and curl commands
+    const imageResults = await Promise.all((imageCandidates || []).map(async item => {
       const p = item.payload || {};
       const imgId = p.image_id || item.id;
-      const variants = getImageVariants(imgId);
+      const variants = await getSignedImageVariants(imgId, env, 7200);
       return {
         image_id: imgId,
         title: p.title || p.filename || "视觉图像资产",
@@ -639,12 +661,13 @@ export async function executeToolCall(
         exif: p.exif || undefined,
         location: p.location || undefined,
         created_at: p.created_at,
+        expires_in: 7200,
         url: variants.public,
         variants,
         variant_guide: AI_VISION_VARIANT_GUIDE,
         curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${variants.public}"`
       };
-    });
+    }));
 
     const totalFound = memoryResults.length + imageResults.length;
     const returnObj: any = {
@@ -1274,7 +1297,7 @@ export async function executeToolCall(
       const cfMatch = p.content?.match(/\[Cloudflare Images ID:\s*([a-zA-Z0-9_-]+)\]/);
       const linkedImageId = cfMatch ? cfMatch[1] : (p as any).image_id;
       if (linkedImageId) {
-        const variants = getImageVariants(linkedImageId);
+        const variants = await getSignedImageVariants(linkedImageId, env, 7200);
         return {
           success: true,
           id: targetId,
@@ -1285,6 +1308,7 @@ export async function executeToolCall(
           variants,
           variant_guide: AI_VISION_VARIANT_GUIDE,
           mime_type: p.mime_type || "image/jpeg",
+          expires_at: new Date(Date.now() + 7200 * 1000).toISOString(),
           curl_command: `curl -s -o "${linkedImageId}.jpg" "${variants.public}"`
         };
       }
@@ -1295,7 +1319,7 @@ export async function executeToolCall(
     if (imgPoint && imgPoint.payload) {
       const p = imgPoint.payload;
       const imgId = p.image_id || imgPoint.id;
-      const variants = getImageVariants(imgId);
+      const variants = await getSignedImageVariants(imgId, env, 7200);
       return {
         success: true,
         id: targetId,
@@ -1309,6 +1333,7 @@ export async function executeToolCall(
         mime_type: "image/jpeg",
         exif: p.exif || undefined,
         location: p.location || undefined,
+        expires_at: new Date(Date.now() + 7200 * 1000).toISOString(),
         curl_command: `curl -s -o "${p.filename || imgId + '.jpg'}" "${variants.public}"`
       };
     }
@@ -1380,34 +1405,55 @@ export async function executeToolCall(
 
   // 13. Tool: request_image_upload
   if (name === "request_image_upload") {
-    const token = env.CLOUDFLARE_API_TOKEN?.trim();
-    const accountId = env.CLOUDFLARE_ACCOUNT_ID?.trim() || "00f6c85f82f6297c8c0bef9460e013d9";
-    if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not configured on MCP server");
-
     const filename = (args.filename || "image.jpg").trim();
-    const formData = new FormData();
-    formData.append("requireSignedURLs", "false");
-    formData.append("metadata", JSON.stringify({ user_id: userId, filename }));
+    let uploadUrl = "";
+    let imageId = "";
 
-    const cfRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v2/direct_upload`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`
-      },
-      body: formData
-    });
-
-    if (!cfRes.ok) {
-      const err = await cfRes.text();
-      throw new Error(`Cloudflare Images direct_upload failed (${cfRes.status}): ${err}`);
+    // 1. Prefer native IMAGES binding if available
+    if (env.IMAGES?.hosted?.createDirectUpload) {
+      try {
+        const directRes = await env.IMAGES.hosted.createDirectUpload({
+          metadata: { user_id: userId, filename },
+          requireSignedURLs: true,
+          expiresIn: 1800
+        });
+        uploadUrl = directRes.uploadURL;
+        imageId = directRes.id;
+      } catch (err) {
+        console.error("IMAGES.hosted.createDirectUpload error, falling back to REST API:", err);
+      }
     }
 
-    const cfData: any = await cfRes.json();
-    const uploadUrl = cfData.result?.uploadURL;
-    const imageId = cfData.result?.id;
-
+    // 2. Fallback to Cloudflare Images REST API v2
     if (!uploadUrl || !imageId) {
-      throw new Error("Failed to obtain uploadURL from Cloudflare Images");
+      const token = env.CLOUDFLARE_API_TOKEN?.trim();
+      const accountId = env.CLOUDFLARE_ACCOUNT_ID?.trim() || "00f6c85f82f6297c8c0bef9460e013d9";
+      if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not configured on MCP server");
+
+      const formData = new FormData();
+      formData.append("requireSignedURLs", "true");
+      formData.append("metadata", JSON.stringify({ user_id: userId, filename }));
+
+      const cfRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v2/direct_upload`, {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${token}`
+        },
+        body: formData
+      });
+
+      if (!cfRes.ok) {
+        const err = await cfRes.text();
+        throw new Error(`Cloudflare Images direct_upload failed (${cfRes.status}): ${err}`);
+      }
+
+      const cfData: any = await cfRes.json();
+      uploadUrl = cfData.result?.uploadURL;
+      imageId = cfData.result?.id;
+
+      if (!uploadUrl || !imageId) {
+        throw new Error("Failed to obtain uploadURL from Cloudflare Images");
+      }
     }
 
     return {
@@ -1415,6 +1461,7 @@ export async function executeToolCall(
       image_id: imageId,
       upload_url: uploadUrl,
       filename,
+      require_signed_urls: true,
       instructions: `请在沙箱中使用 curl 执行直接上传：\ncurl -X POST -F "file=@<本地图片绝对路径>" "${uploadUrl}"\n\n上传成功后，请发挥你的视觉大模型能力深度观察画面，然后调用 commit_image_record 工具将该图片录入图库与便签。`
     };
   }
