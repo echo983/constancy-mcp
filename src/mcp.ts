@@ -218,6 +218,20 @@ export const MCP_TOOLS = [
       },
       required: ["content"]
     }
+  },
+  {
+    name: "get_note",
+    description: "按 ID 精确获取指定便签或存根的完整数据，包括完整的 Base64 二进制载荷。当 search_memory 检索发现 has_base64: true 且确实需要获取原始二进制数据时按需调用。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "便签或存根的记忆 ID (UUID)"
+        }
+      },
+      required: ["id"]
+    }
   }
 ];
 
@@ -328,7 +342,8 @@ export async function executeToolCall(
           retired_at: p.retired_at,
           retired_reason: p.retired_reason,
           title: p.title || undefined,
-          base64: p.base64 || undefined,
+          has_base64: Boolean(p.base64),
+          base64_length: p.base64 ? p.base64.length : undefined,
           mime_type: p.mime_type || undefined
         });
         continue;
@@ -370,7 +385,8 @@ export async function executeToolCall(
           status_badge: classification.badge,
           prompt_guidance: classification.guidance,
           title: p.title || undefined,
-          base64: p.base64 || undefined,
+          has_base64: Boolean(p.base64),
+          base64_length: p.base64 ? p.base64.length : undefined,
           mime_type: p.mime_type || undefined
         });
       }
@@ -417,7 +433,8 @@ export async function executeToolCall(
           retired: true,
           retired_reason: payload.retired_reason,
           title: payload.title || undefined,
-          base64: payload.base64 || undefined,
+          has_base64: Boolean(payload.base64),
+          base64_length: payload.base64 ? payload.base64.length : undefined,
           mime_type: payload.mime_type || undefined
         });
         continue;
@@ -443,7 +460,8 @@ export async function executeToolCall(
         status: classification.status,
         status_badge: classification.badge,
         title: payload.title || undefined,
-        base64: payload.base64 || undefined,
+        has_base64: Boolean(payload.base64),
+        base64_length: payload.base64 ? payload.base64.length : undefined,
         mime_type: payload.mime_type || undefined
       });
     }
@@ -667,6 +685,35 @@ export async function executeToolCall(
       tags,
       stable_expected: `约 ${expectedHours} 小时`,
       message: `📝 已原样存入记事本 [ID: ${pointId}, 常度: ${chPrior}${base64 ? `, 附带 ${base64.length} 字符 BASE64 载荷` : ""}]`
+    };
+  }
+
+  // 8. Tool: get_note
+  if (name === "get_note") {
+    const pointId = (args.id || "").trim();
+    if (!pointId) throw new Error("Missing note id");
+
+    const point = await getPointById(pointId, env);
+    if (!point || !point.payload || point.payload.user_id !== userId) {
+      throw new Error(`Note '${pointId}' not found or unauthorized`);
+    }
+
+    const p = point.payload;
+    return {
+      id: point.id,
+      type: p.type,
+      title: p.title || undefined,
+      content: p.content,
+      base64: p.base64 || undefined,
+      has_base64: Boolean(p.base64),
+      base64_length: p.base64 ? p.base64.length : 0,
+      mime_type: p.mime_type || undefined,
+      tags: p.tags || [],
+      c_h: p.ch_prior,
+      timestamp: p.timestamp,
+      date: p.date,
+      retired: Boolean(p.retired),
+      retired_reason: p.retired_reason || undefined
     };
   }
 

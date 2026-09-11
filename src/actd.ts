@@ -58,7 +58,8 @@ export interface EvaluatedMemory {
 
   // Optional Note & Raw Scratchpad Fields
   title?: string;
-  base64?: string;
+  has_base64?: boolean;
+  base64_length?: number;
   mime_type?: string;
 }
 
@@ -197,8 +198,8 @@ export function classifyHealth(
     ["unverified", "rumor", "speculation", "hearsay", "传闻", "未证实"].includes(t.toLowerCase())
   );
 
-  const isPreferenceOrMemo = type === "memo" || tags.some(t => 
-    ["subjective", "preference", "偏好", "习惯"].includes(t.toLowerCase())
+  const isPreference = tags.some(t => 
+    ["preference", "profile", "subjective", "偏好", "习惯", "自陈"].includes(t.toLowerCase())
   );
 
   if (V >= 0.7) {
@@ -209,7 +210,7 @@ export function classifyHealth(
         guidance: "该信息处于新鲜时效期内，但其属性为【未证实传闻】。向用户表达时必须明确说明信源背景与未证实属性，严禁断言为既成事实。"
       };
     }
-    if (isPreferenceOrMemo) {
+    if (isPreference) {
       return {
         status: "FRESH",
         badge: "🟢 确信偏好 (Fresh / 个人自陈)",
@@ -226,7 +227,14 @@ export function classifyHealth(
       return {
         status: "DRIFTING",
         badge: "🟡 临界待核实 (Drifting / 未证实)",
-        guidance: "该未证实传闻/备忘已跨越常规讨论周期，极可能已辟谣或落地，必须向用户核实最新进展。"
+        guidance: "该未证实传闻已跨越常规讨论周期，极可能已辟谣或落地，必须向用户核实最新进展。"
+      };
+    }
+    if (isPreference) {
+      return {
+        status: "DRIFTING",
+        badge: "🟡 临界偏好 (Drifting / 偏好演化)",
+        guidance: "这是用户的历史偏好或习惯，但已跨越常规讨论周期，人的偏好或习惯可能随时间演化，请在回答时审慎向用户核实。"
       };
     }
     return {
