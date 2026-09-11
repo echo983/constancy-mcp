@@ -10,9 +10,13 @@ import {
   interpolateResonantHeat,
   computeEpistemicHealth,
   classifyHealth,
+  getSourceBadge,
   EvaluatedMemory,
   MemoryPointPayload,
-  NoteRevision
+  NoteRevision,
+  MemorySourceType,
+  MemoryAnnotation,
+  AnnotationKind
 } from "./actd";
 import { getEmbedding, VoyageEnv } from "./voyage";
 import {
@@ -23,6 +27,7 @@ import {
   findEntityPoints,
   retireMemoryPoints,
   deleteMemoryPoints,
+  appendMemoryAnnotation,
   getTimelinePoints,
   updatePointSpectrum,
   getPointById,
@@ -120,6 +125,11 @@ export const MCP_TOOLS = [
           type: "array",
           items: { type: "string" },
           description: "主题分类标签（如 ['linux', 'backup']）"
+        },
+        source: {
+          type: "string",
+          enum: ["user_stated", "model_suggested", "model_inferred", "external"],
+          description: "【认知来源强定性】必须明确该陈述的产生主体：'user_stated'(用户明确陈述/指令/偏好)、'model_suggested'(模型主动提议/建议/备选方案)、'model_inferred'(模型根据上下文分析推论出的规律)、'external'(第三方/工具/外部抓取)。【铁律门禁】只有 'user_stated' 才能登记为 decision(决策) 或待办事项(todo/action)，模型的建议或推断只能作为 insight/memo，违者门口硬拦截！默认 'user_stated'。"
         }
       },
       required: ["content"]
@@ -501,6 +511,38 @@ export const MCP_TOOLS = [
       },
       required: ["image_id", "description"]
     }
+  },
+  {
+    name: "annotate_memory",
+    description: "【非破坏性勘误与附注】对既有记忆碎片进行局部纠错、存疑标记或上下文补充。原文与向量一字不动，不破坏原有时空坐标与因果可证伪性，通过追加不可变注记并置呈现，保证认知审计透明。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "目标记忆点的 UUID"
+        },
+        kind: {
+          type: "string",
+          enum: ["correction", "dispute", "context"],
+          description: "注记类型：'correction'(事实局部更正与纠偏)、'dispute'(存疑与分歧标记)、'context'(补充后续背景或证据)"
+        },
+        text: {
+          type: "string",
+          description: "具体注记说明（指出哪一句有误，纠正后的客观事实是什么）"
+        },
+        source: {
+          type: "string",
+          enum: ["user_stated", "model_inferred", "external"],
+          description: "注记来源，默认为 'user_stated'"
+        },
+        ref_id: {
+          type: "string",
+          description: "可选。关联的新记忆点 ID 或证据存根 ID"
+        }
+      },
+      required: ["id", "kind", "text"]
+    }
   }
 ];
 
@@ -521,18 +563,44 @@ export async function executeToolCall(
     const content = (args.content || "").trim();
     if (!content) throw new Error("Missing content");
 
+    const rawSource = String(args.source || "user_stated").toLowerCase().trim();
+    const validSources: MemorySourceType[] = ["user_stated", "model_suggested", "model_inferred", "external"];
+    const source: MemorySourceType = (validSources.includes(rawSource as any) ? rawSource : "user_stated") as MemorySourceType;
+
     const chPrior = typeof args.c_h === "number" ? args.c_h : 9.0;
     const type = args.type || "insight";
     const entities = Array.isArray(args.entities) ? args.entities : [];
     const tags = Array.isArray(args.tags) ? args.tags : [];
+
+    // 门口硬门禁：只有 user_stated 才能建立决策或待办任务！
+    const hasTodoOrAction = tags.some(t => /todo|待办|action|task|计划/i.test(t)) || /待办|TODO/i.test(content);
+    if ((type === "decision" || hasTodoOrAction) && source !== "user_stated") {
+      throw new Error(
+        `❌ 门口硬门禁拦截：只有用户明确陈述 ('user_stated') 才能登记为决策 (decision) 或待办任务 (todo)。当前来源标记为 '${source}'。模型的主动提议或推断请登记为 'insight' / 'memo'，严禁越权替用户设立待办或决策！`
+      );
+    }
+
+    // 规范化来源前缀
+    let formattedContent = content;
+    const prefixMap: Record<MemorySourceType, string> = {
+      user_stated: "【来源: 用户直陈】",
+      model_suggested: "【来源: 模型建议】",
+      model_inferred: "【来源: 模型推断】",
+      external: "【来源: 外部输入】"
+    };
+    if (!formattedContent.startsWith("【来源:")) {
+      formattedContent = `${prefixMap[source]}\n${formattedContent}`;
+    }
 
     // Initial energy injection
     const initialSpectrum = injectIntent(new Array(7).fill(0), 1.0);
 
     const payload: MemoryPointPayload = {
       user_id: userId,
-      content,
+      content: formattedContent,
+      source,
       timestamp: now.toISOString(),
+      created_at: now.toISOString(),
       date: todayStr,
       type,
       entities,
@@ -544,7 +612,7 @@ export async function executeToolCall(
     };
 
     // Vectorize via Voyage AI
-    const vector = await getEmbedding(content, env, "document");
+    const vector = await getEmbedding(formattedContent, env, "document");
     const pointId = crypto.randomUUID();
 
     await upsertMemoryPoint(pointId, vector, payload, env);
@@ -553,9 +621,11 @@ export async function executeToolCall(
     return {
       success: true,
       id: pointId,
+      source,
+      source_badge: getSourceBadge(source),
       c_h: chPrior,
       stable_expected: `约 ${expectedHours} 小时`,
-      message: `✅ 已成功存入人基常热记忆体 [常度: ${chPrior}, 预期基础稳定期: ${expectedHours}h]`
+      message: `✅ 已成功存入人基常热记忆体 [来源: ${getSourceBadge(source)}, 常度: ${chPrior}, 预期基础稳定期: ${expectedHours}h]`
     };
   }
 
@@ -625,13 +695,17 @@ export async function executeToolCall(
       const similarityScore = Number((item.score || 0).toFixed(4));
 
       if (isRetired) {
-        const classification = classifyHealth(0.0, p.tags || [], p.type || "", true, p.retired_reason || "");
+        const classification = classifyHealth(0.0, p.tags || [], p.type || "", true, p.retired_reason || "", p.annotations);
         // Severely penalize composite score for retired memories so they rank at the bottom
         const compositeScore = Number((similarityScore * 0.01).toFixed(4));
         evaluatedList.push({
           id: item.id,
           content: p.content,
           type: p.type,
+          source: p.source || undefined,
+          source_badge: getSourceBadge(p.source),
+          annotations: p.annotations && p.annotations.length > 0 ? p.annotations : undefined,
+          has_annotations: Boolean(p.annotations && p.annotations.length > 0),
           entities: p.entities || [],
           tags: p.tags || [],
           timestamp: p.timestamp,
@@ -667,7 +741,7 @@ export async function executeToolCall(
 
       // 3. Compute Epistemic Health V (t_last_strong is NEVER updated by passive search)
       const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
-      const classification = classifyHealth(V, p.tags || [], p.type || "", false, "");
+      const classification = classifyHealth(V, p.tags || [], p.type || "", false, "", p.annotations);
 
       // 4. Semantic similarity score & Composite Ranking
       // Composite Score: Semantic score is primary; V modulates confidence (0.6 + 0.4 * V)
@@ -679,6 +753,10 @@ export async function executeToolCall(
           id: item.id,
           content: p.content,
           type: p.type,
+          source: p.source || undefined,
+          source_badge: getSourceBadge(p.source),
+          annotations: p.annotations && p.annotations.length > 0 ? p.annotations : undefined,
+          has_annotations: Boolean(p.annotations && p.annotations.length > 0),
           entities: p.entities || [],
           tags: p.tags || [],
           timestamp: p.timestamp,
@@ -1767,6 +1845,52 @@ export async function executeToolCall(
     };
   }
 
+  // 15. Tool: annotate_memory
+  if (name === "annotate_memory") {
+    const pointId = (args.id || "").trim();
+    if (!pointId) throw new Error("Missing id");
+    const kind = (args.kind || "").trim().toLowerCase() as AnnotationKind;
+    if (!["correction", "dispute", "context"].includes(kind)) {
+      throw new Error(`Invalid kind: '${kind}'. Must be one of: 'correction', 'dispute', 'context'`);
+    }
+    const text = (args.text || "").trim();
+    if (!text) throw new Error("Missing text");
+
+    const rawSource = String(args.source || "user_stated").toLowerCase().trim();
+    const source: MemorySourceType = (["user_stated", "model_inferred", "external"].includes(rawSource) ? rawSource : "user_stated") as MemorySourceType;
+    const refId = typeof args.ref_id === "string" ? args.ref_id.trim() : undefined;
+
+    const annotationId = crypto.randomUUID();
+    const annotation: MemoryAnnotation = {
+      id: annotationId,
+      timestamp: now.toISOString(),
+      kind,
+      text,
+      source,
+      ref_id: refId
+    };
+
+    const updatedPayload = await appendMemoryAnnotation(pointId, annotation, env);
+
+    const kindEmojiMap: Record<AnnotationKind, string> = {
+      correction: "⚠️ 事实更正",
+      dispute: "⚡ 存疑争议",
+      context: "📝 补充附注"
+    };
+
+    return {
+      success: true,
+      id: pointId,
+      annotation_id: annotationId,
+      kind,
+      kind_label: kindEmojiMap[kind],
+      source,
+      source_badge: getSourceBadge(source),
+      total_annotations: updatedPayload.annotations?.length || 1,
+      message: `📌 已成功向记忆 '${pointId}' 追加不可变附注 [类型: ${kindEmojiMap[kind]}, 来源: ${getSourceBadge(source)}]。原文一字不动，保留因果可证伪性；后续检索将并置展示更正警示。`
+    };
+  }
+
   throw new Error(`Unknown tool: ${name}`);
 }
 
@@ -1793,7 +1917,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.3.1",
+          version: "1.4.0",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }

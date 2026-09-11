@@ -2,7 +2,7 @@
  * Qdrant Vector Client for constancy_memories Collection
  */
 
-import { MemoryPointPayload } from "./actd";
+import { MemoryPointPayload, MemoryAnnotation } from "./actd";
 
 export interface QdrantEnv {
   QDRANT_URL: string;
@@ -647,5 +647,32 @@ export async function deleteMemoryPoints(
     const errText = await res.text();
     console.error(`Qdrant deleteMemoryPoints error (${res.status}): ${errText}`);
   }
+}
+
+export async function appendMemoryAnnotation(
+  pointId: string,
+  annotation: MemoryAnnotation,
+  env: QdrantEnv
+): Promise<MemoryPointPayload> {
+  const point = await getPointById(pointId, env);
+  if (!point || !point.payload) {
+    throw new Error(`Memory point '${pointId}' not found.`);
+  }
+  const currentAnnotations = Array.isArray(point.payload.annotations)
+    ? [...point.payload.annotations]
+    : [];
+
+  currentAnnotations.push(annotation);
+
+  await setPointPayload(pointId, { 
+    annotations: currentAnnotations,
+    t_last_update: Date.now()
+  }, env);
+
+  return {
+    ...point.payload,
+    annotations: currentAnnotations,
+    t_last_update: Date.now()
+  };
 }
 

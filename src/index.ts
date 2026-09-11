@@ -161,37 +161,37 @@ export default {
     if (url.pathname === "/api/health") {
       return jsonResponse({
         status: "healthy",
-        version: "1.3.1",
+        version: "1.4.0",
         domain,
         time: new Date().toISOString(),
         qdrant_target: env.QDRANT_URL
       });
     }
 
-    // 7. Homepage / Server Status Dashboard
+    // 7. Web UI Dashboard & Discovery Root (/)
     if (url.pathname === "/" || url.pathname === "/index.html") {
       const html = `<!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Constancy MCP Server</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>🧬 Constancy MCP Server (ACTD v1.0)</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0b0f19; color: #f1f5f9; padding: 2rem 1rem; line-height: 1.6; }
-    .container { max-width: 720px; margin: 0 auto; background: #131b2e; padding: 2.5rem; border-radius: 1rem; border: 1px solid #1e293b; box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
-    h1 { margin-top: 0; color: #38bdf8; font-size: 1.8rem; display: flex; align-items: center; gap: 0.6rem; }
-    .badge { display: inline-block; background: #0284c7; color: #fff; font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 9999px; vertical-align: middle; }
-    .box { background: #0a0f1d; padding: 1.25rem; border-radius: 0.75rem; border: 1px solid #1e293b; margin: 1.5rem 0; font-family: monospace; font-size: 0.9rem; }
-    .box pre { margin: 0; overflow-x: auto; color: #7dd3fc; }
-    .status-ok { color: #4ade80; font-weight: bold; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; line-height: 1.6; }
+    .card { max-width: 800px; margin: 0 auto; background: #1e293b; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3); border: 1px solid #334155; }
+    h1 { color: #38bdf8; margin-top: 0; font-size: 1.8rem; display: flex; align-items: center; gap: 0.5rem; }
+    .badge { background: #0284c7; color: white; font-size: 0.8rem; padding: 0.2rem 0.6rem; border-radius: 9999px; }
+    .status-ok { color: #4ade80; font-weight: 600; }
+    .box { background: #0f172a; padding: 1rem 1.25rem; border-radius: 0.5rem; border-left: 4px solid #38bdf8; font-family: monospace; font-size: 0.9rem; margin: 1.5rem 0; overflow-x: auto; }
     a { color: #38bdf8; text-decoration: none; }
     a:hover { text-decoration: underline; }
-    ul { padding-left: 1.2rem; color: #94a3b8; }
-    li { margin-bottom: 0.4rem; }
+    ul { padding-left: 1.5rem; }
+    li { margin-bottom: 0.75rem; color: #cbd5e1; }
+    b { color: #f1f5f9; }
   </style>
 </head>
 <body>
-  <div class="container">
+  <div class="card">
     <h1>🧬 Constancy MCP Server <span class="badge">ACTD v1.0</span></h1>
     <p>基于<b>人基常热动力学（Anthropocentric Chrono-Thermal Dynamics）</b>的数字海马体记忆外脑。支持“主动记、自动忘、懂分寸、读空气”，基于 <code>Voyage-Multimodal-3.5</code> 统一度量衡实现图文同构检索。</p>
     
@@ -203,10 +203,10 @@ export default {
 https://${domain}/sse (Legacy SSE)</pre>
     </div>
 
-    <h3>内置核心工具 (14 Tools)</h3>
+    <h3>内置核心工具 (15 Tools)</h3>
     <ul>
-      <li><b>log_memory / search_memory</b>: 认知碎片提炼、时空结构化过滤（时间范围与地理半径）、Voyage-Multimodal-3.5 多模态检索与 ACTD 时效仲裁</li>
-      <li><b>confirm_memory / retire_memory</b>: 临界记忆强信号复核加温与抗熵失效归档（彻底杜绝幽灵诈尸）</li>
+      <li><b>log_memory / search_memory</b>: 认知来源定性、待办/决策硬门禁拦截、时空结构化过滤、多模态检索与 ACTD 时效仲裁</li>
+      <li><b>confirm_memory / retire_memory / annotate_memory</b>: 强信号复核加温、墓碑失效归档与非破坏性不可变勘误注记（保证因果可证伪性）</li>
       <li><b>save_note / get_note / list_notes / update_note</b>: 极简便签记事本、标签枚举待办与多版本修订审计</li>
       <li><b>get_blob_url / create_upload_url</b>: 便签二进制 Capability 直传直下，沙箱零 Token 传输二进制</li>
       <li><b>request_image_upload / commit_image_record</b>: 高画质多模态图片直传流水线、EXIF 时空元数据与视觉特征向量入库</li>
