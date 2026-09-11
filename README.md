@@ -103,6 +103,7 @@ graph LR
 
 - [x] 《人基常度》形式化理论定义与标尺 ([docs/THEORY.md](docs/THEORY.md))
 - [x] 《人基常热动力学 ACTD v1.0》统一规范 ([docs/ACTD_SPEC.md](docs/ACTD_SPEC.md))
+- [x] 数学自洽性审计与 4 大典型/极端场景全推演 ([docs/VERIFICATION.md](docs/VERIFICATION.md))
 - [ ] 基于 Qdrant + Cloudflare Worker 的边缘向量与 ACTD 算法引擎
 - [ ] 官方 TypeScript / Python 本地 MCP Server 实现
 - [ ] Claude Desktop / Cursor / Antigravity 一键安装配置指南
