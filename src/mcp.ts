@@ -830,6 +830,25 @@ export async function executeToolCall(
     }
 
     const p = point.payload;
+
+    let sha256 = p.sha256;
+    if (!sha256 && p.base64) {
+      sha256 = await computeBase64Sha256(p.base64);
+      setPointPayload(pointId, { sha256 }, env).catch(() => {});
+    }
+
+    const exactBytes = p.base64 ? atob(p.base64).length : 0;
+
+    // Sanitize revisions so they never contain large Base64 blobs
+    const sanitizedRevisions = (p.revisions || []).map((r: any) => ({
+      timestamp: r.timestamp,
+      content: r.content,
+      title: r.title,
+      tags: r.tags,
+      mime_type: r.mime_type,
+      sha256: r.sha256
+    }));
+
     return {
       id: point.id,
       type: p.type,
@@ -838,13 +857,14 @@ export async function executeToolCall(
       base64: p.base64 || undefined,
       has_base64: Boolean(p.base64),
       base64_length: p.base64 ? p.base64.length : 0,
-      sha256: p.sha256 || undefined,
+      size_bytes: exactBytes,
+      sha256: sha256 || undefined,
       mime_type: p.mime_type || undefined,
       tags: p.tags || [],
       c_h: p.ch_prior,
       timestamp: p.timestamp,
       date: p.date,
-      revisions: p.revisions || [],
+      revisions: sanitizedRevisions,
       retired: Boolean(p.retired),
       retired_reason: p.retired_reason || undefined
     };
@@ -939,13 +959,12 @@ export async function executeToolCall(
       throw new Error(`Memory '${pointId}' is of type '${p.type}', not 'note'. Use appropriate memory tools to update.`);
     }
 
-    // Save previous snapshot to revisions array
+    // Save previous snapshot to revisions array (strictly metadata & sha256, no raw base64)
     const previousSnapshot: NoteRevision = {
       timestamp: now.toISOString(),
       content: p.content,
       title: p.title,
       tags: p.tags ? [...p.tags] : [],
-      base64: p.base64,
       mime_type: p.mime_type,
       sha256: p.sha256
     };
@@ -1075,14 +1094,22 @@ export async function executeToolCall(
     const domain = env.DOMAIN || "mcp.kufof.uk";
     const downloadUrl = `https://${domain}/blob/${pointId}?exp=${exp}&sig=${sig}`;
 
+    let sha256 = p.sha256;
+    if (!sha256 && p.base64) {
+      sha256 = await computeBase64Sha256(p.base64);
+      setPointPayload(pointId, { sha256 }, env).catch(() => {});
+    }
+
+    const exactBytes = p.base64 ? atob(p.base64).length : 0;
+
     return {
       success: true,
       id: pointId,
       title: p.title || undefined,
       download_url: downloadUrl,
       mime_type: p.mime_type || "application/octet-stream",
-      sha256: p.sha256 || undefined,
-      size_bytes: p.base64 ? Math.floor((p.base64.length * 3) / 4) : 0,
+      sha256: sha256 || undefined,
+      size_bytes: exactBytes,
       expires_at: new Date(exp * 1000).toISOString(),
       curl_command: `curl -s -o attachment "${downloadUrl}"`
     };

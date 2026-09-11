@@ -163,9 +163,15 @@ export async function handleBlobRequest(
       });
     }
 
+    let sha256 = point.payload.sha256;
+    if (!sha256 && point.payload.base64) {
+      sha256 = await computeBase64Sha256(point.payload.base64);
+      // Backfill sha256 to Qdrant so subsequent reads and audits have it
+      setPointPayload(blobId, { sha256 }, env).catch(() => {});
+    }
+
     const bytes = base64ToUint8Array(point.payload.base64);
     const mimeType = point.payload.mime_type || "application/octet-stream";
-    const sha256 = point.payload.sha256 || "";
 
     return new Response(bytes, {
       status: 200,
@@ -175,7 +181,7 @@ export async function handleBlobRequest(
         "Content-Disposition": "attachment",
         "X-Content-Type-Options": "nosniff",
         "Content-Security-Policy": "sandbox; default-src 'none'",
-        "ETag": `"${sha256}"`,
+        "ETag": `"${sha256 || ""}"`,
         "Cache-Control": "private, max-age=300",
         ...CORS_HEADERS
       }
@@ -222,12 +228,30 @@ export async function handleBlobRequest(
     }
 
     const nowMs = Date.now();
+    const revisions: any[] = Array.isArray(point.payload.revisions) ? [...point.payload.revisions] : [];
+
+    // If note already had a binary payload or previous revision, archive previous snapshot into revisions
+    if (point.payload.base64 || point.payload.sha256) {
+      revisions.push({
+        timestamp: new Date(point.payload.t_last_update || nowMs).toISOString(),
+        content: point.payload.content,
+        title: point.payload.title,
+        tags: point.payload.tags ? [...point.payload.tags] : [],
+        mime_type: point.payload.mime_type,
+        sha256: point.payload.sha256
+      });
+      if (revisions.length > 5) {
+        revisions.splice(0, revisions.length - 5);
+      }
+    }
+
     await setPointPayload(
       blobId,
       {
         base64,
         sha256,
         mime_type: mimeType,
+        revisions,
         t_last_update: nowMs,
         t_last_strong: nowMs
       },
@@ -241,6 +265,7 @@ export async function handleBlobRequest(
         bytes_received: arrayBuffer.byteLength,
         sha256,
         mime_type: mimeType,
+        revisions_count: revisions.length,
         message: `Binary payload successfully uploaded (${arrayBuffer.byteLength} bytes, SHA-256: ${sha256})`
       }),
       {

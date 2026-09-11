@@ -40,7 +40,6 @@ export interface NoteRevision {
   content: string;
   title?: string;
   tags?: string[];
-  base64?: string;
   mime_type?: string;
   sha256?: string;
 }
