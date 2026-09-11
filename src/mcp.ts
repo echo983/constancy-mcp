@@ -31,6 +31,18 @@ import { computeBase64Sha256, generateBlobSig } from "./blob";
 
 export const CF_IMAGE_DELIVERY_HASH = "uTkE-E-smfahZbJoOmXVCw";
 
+export function getImageVariants(imageId: string) {
+  const base = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imageId}`;
+  return {
+    public: `${base}/public`,
+    ai1024: `${base}/ai1024`,
+    ai768: `${base}/ai768`,
+    ai512: `${base}/ai512`
+  };
+}
+
+export const AI_VISION_VARIANT_GUIDE = "视觉模型传图分辨率指引：1) 密集文本/架构图/复杂图表选 ai1024；2) 通用场景/日常照片理解选 ai768（推荐默认，精度与Token开销平衡）；3) 快速识别/粗粒度分类选 ai512（极低Token）；4) 用户查看或下载提供 public。";
+
 export interface McpEnv extends VoyageEnv, QdrantEnv {
   JWT_SECRET: string;
   DOMAIN: string;
@@ -74,7 +86,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "search_memory",
-    description: "按语义意图跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态同时召回文字记忆与相关的 Cloudflare 视觉图片卡片（含直接访问链接与沙箱 curl 命令）。",
+    description: "按语义意图跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态同时召回文字记忆与相关的 Cloudflare 视觉图片卡片。每张图片均提供 variants 多分辨率变体（ai1024 适于密集文本/细微细节、ai768 适于通用场景分析推荐、ai512 极速轻量低 Token、public 用于用户查看）以及沙箱 curl 命令，供大模型根据实际分析需求自主选用。",
     inputSchema: {
       type: "object",
       properties: {
@@ -324,7 +336,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "get_blob_url",
-    description: "【二进制与视觉资产召回】根据 ID 召回二进制资源下载链接。支持多态识别：既支持获取 Note 便签中的普通文件附件（PDF/文档/压缩包等，生成带防盗签名的 5 分钟直链），也支持传入 Cloudflare 图片 ID 或关联便签 ID（直接返回 Cloudflare Images 官方 CDN 链接、各尺寸变体与沙箱 curl 命令）。零 Token 传输二进制。",
+    description: "【二进制与视觉资产召回】根据 ID 召回二进制资源下载链接。支持多态识别：既支持获取 Note 便签中的普通文件附件（PDF/文档/压缩包等，生成带防盗签名的 5 分钟直链），也支持传入 Cloudflare 图片 ID 或关联便签 ID（直接返回包含 ai1024、ai768、ai512、public 多尺寸变体的 CDN 链接与沙箱 curl 命令，供大模型按精度与 Token 预算自主选用）。零 Token 传输二进制。",
     inputSchema: {
       type: "object",
       properties: {
@@ -616,8 +628,7 @@ export async function executeToolCall(
     const imageResults = (imageCandidates || []).map(item => {
       const p = item.payload || {};
       const imgId = p.image_id || item.id;
-      const pubUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/public`;
-      const aiUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/ai1024`;
+      const variants = getImageVariants(imgId);
       return {
         image_id: imgId,
         title: p.title || p.filename || "视觉图像资产",
@@ -628,9 +639,10 @@ export async function executeToolCall(
         exif: p.exif || undefined,
         location: p.location || undefined,
         created_at: p.created_at,
-        url: pubUrl,
-        ai_vision_url: aiUrl,
-        curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${pubUrl}"`
+        url: variants.public,
+        variants,
+        variant_guide: AI_VISION_VARIANT_GUIDE,
+        curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${variants.public}"`
       };
     });
 
@@ -1262,18 +1274,18 @@ export async function executeToolCall(
       const cfMatch = p.content?.match(/\[Cloudflare Images ID:\s*([a-zA-Z0-9_-]+)\]/);
       const linkedImageId = cfMatch ? cfMatch[1] : (p as any).image_id;
       if (linkedImageId) {
-        const pubUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${linkedImageId}/public`;
-        const aiUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${linkedImageId}/ai1024`;
+        const variants = getImageVariants(linkedImageId);
         return {
           success: true,
           id: targetId,
           image_id: linkedImageId,
           type: "cloudflare_image",
           title: p.title || "视觉图像资产",
-          download_url: pubUrl,
-          ai_vision_url: aiUrl,
+          download_url: variants.public,
+          variants,
+          variant_guide: AI_VISION_VARIANT_GUIDE,
           mime_type: p.mime_type || "image/jpeg",
-          curl_command: `curl -s -o "${linkedImageId}.jpg" "${pubUrl}"`
+          curl_command: `curl -s -o "${linkedImageId}.jpg" "${variants.public}"`
         };
       }
     }
@@ -1283,8 +1295,7 @@ export async function executeToolCall(
     if (imgPoint && imgPoint.payload) {
       const p = imgPoint.payload;
       const imgId = p.image_id || imgPoint.id;
-      const pubUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/public`;
-      const aiUrl = `https://imagedelivery.net/${CF_IMAGE_DELIVERY_HASH}/${imgId}/ai1024`;
+      const variants = getImageVariants(imgId);
       return {
         success: true,
         id: targetId,
@@ -1292,12 +1303,13 @@ export async function executeToolCall(
         type: "cloudflare_image",
         title: p.title || p.filename || "视觉图像资产",
         description: p.description || undefined,
-        download_url: pubUrl,
-        ai_vision_url: aiUrl,
+        download_url: variants.public,
+        variants,
+        variant_guide: AI_VISION_VARIANT_GUIDE,
         mime_type: "image/jpeg",
         exif: p.exif || undefined,
         location: p.location || undefined,
-        curl_command: `curl -s -o "${p.filename || imgId + '.jpg'}" "${pubUrl}"`
+        curl_command: `curl -s -o "${p.filename || imgId + '.jpg'}" "${variants.public}"`
       };
     }
 
