@@ -1,0 +1,17 @@
+name = "constancy-mcp"
+main = "src/index.ts"
+compatibility_date = "2024-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+QDRANT_URL = "https://vec.kufof.uk"
+DOMAIN = "mcp.kufof.uk"
+JWT_SECRET = "actd-constancy-mcp-secret-key-2026-kufof"
+
+routes = [
+  { pattern = "mcp.kufof.uk", custom_domain = true }
+]
+
+[[kv_namespaces]]
+binding = "CONSTANCY_KV"
+id = "da53b81e79214d7fb00de2d27af8cc42"
