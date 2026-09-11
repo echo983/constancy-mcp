@@ -20,6 +20,8 @@ import {
   searchMemoryPoints,
   searchImagePoints,
   getImagePoint,
+  findEntityPoints,
+  deleteMemoryPoints,
   getTimelinePoints,
   updatePointSpectrum,
   getPointById,
@@ -887,6 +889,7 @@ export async function executeToolCall(
       timestamp: now.toISOString(),
       date: todayStr,
       type: "entity",
+      entity_name: entityName,
       entities: [entityName, ...(args.aliases || []), ...(args.relations || [])],
       tags: ["entity_registry", "core_knowledge"],
       ch_prior: chPrior,
@@ -896,14 +899,35 @@ export async function executeToolCall(
     };
 
     const vector = await getEmbedding(fullContent, env, "document");
-    const pointId = crypto.randomUUID();
+
+    // Idempotent upsert: check if entity already exists for this user
+    const existingPoints = await findEntityPoints(entityName, userId, env);
+    let pointId: string;
+    let isUpdate = false;
+
+    if (existingPoints.length > 0) {
+      isUpdate = true;
+      pointId = existingPoints[0].id;
+      // If there are duplicate points from past runs, purge the duplicates to ensure single source of truth
+      if (existingPoints.length > 1) {
+        const duplicateIds = existingPoints.slice(1).map(p => p.id);
+        await deleteMemoryPoints(duplicateIds, env);
+      }
+    } else {
+      pointId = crypto.randomUUID();
+    }
+
     await upsertMemoryPoint(pointId, vector, payload, env);
 
     return {
       success: true,
       entity: entityName,
+      point_id: pointId,
+      updated: isUpdate,
       c_h: chPrior,
-      message: `🏛️ 已成功将实体 '${entityName}' 固化至核心实体百科清单 (常度: 11.5，百年基石级)`
+      message: isUpdate
+        ? `🏛️ 已成功更新实体 '${entityName}' 的百科条目（常度: 11.5，百年基石级${existingPoints.length > 1 ? `，已清理 ${existingPoints.length - 1} 条历史重复条目` : ""}）`
+        : `🏛️ 已成功将实体 '${entityName}' 固化至核心实体百科清单 (常度: 11.5，百年基石级)`
     };
   }
 

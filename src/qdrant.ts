@@ -316,3 +316,67 @@ export async function getImagePoint(
   return null;
 }
 
+export async function findEntityPoints(
+  entityName: string,
+  userId: string,
+  env: QdrantEnv
+): Promise<Array<{ id: string; payload?: MemoryPointPayload }>> {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/scroll`;
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 100,
+      with_payload: true,
+      with_vector: false,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } },
+          { key: "type", match: { value: "entity" } }
+        ]
+      }
+    })
+  });
+
+  if (!res.ok) {
+    return [];
+  }
+
+  const data: any = await res.json();
+  const points: Array<{ id: string; payload?: MemoryPointPayload }> = data.result?.points || [];
+  const targetLower = entityName.toLowerCase().trim();
+
+  return points.filter(p => {
+    const payload = p.payload as any;
+    if (!payload) return false;
+    // 1. Match explicit entity_name field
+    if (payload.entity_name && String(payload.entity_name).toLowerCase().trim() === targetLower) {
+      return true;
+    }
+    // 2. Match content header 【核心实体: <name>】
+    const content = String(payload.content || "");
+    const headerMatch = content.match(/^【核心实体:\s*([^】]+)】/);
+    if (headerMatch && headerMatch[1].toLowerCase().trim() === targetLower) {
+      return true;
+    }
+    return false;
+  });
+}
+
+export async function deleteMemoryPoints(
+  pointIds: string[],
+  env: QdrantEnv
+): Promise<void> {
+  if (!pointIds || pointIds.length === 0) return;
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/delete?wait=true`;
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({
+      points: pointIds
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`Qdrant deleteMemoryPoints error (${res.status}): ${errText}`);
+  }
+}
+

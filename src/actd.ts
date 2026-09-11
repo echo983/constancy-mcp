@@ -27,6 +27,9 @@ export interface MemoryPointPayload {
   retired_at?: string;
   retired_reason?: string;
 
+  // Optional Entity Fields
+  entity_name?: string;
+
   // Optional Note & Raw Scratchpad Fields
   title?: string;
   base64?: string;
