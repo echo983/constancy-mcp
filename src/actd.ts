@@ -37,7 +37,9 @@ export interface EvaluatedMemory {
   ch_prior: number;
   ch_dynamic: number;
   resonant_heat: number;
-  validity: number;       // V in [0, 1]
+  similarity_score?: number; // Semantic Cosine similarity from Qdrant
+  composite_score?: number;  // Combined ranking score (semantic * temporal validity)
+  validity: number;          // V in [0, 1]
   status: HealthStatus;
   status_badge: string;
   prompt_guidance: string;

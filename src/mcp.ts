@@ -6,7 +6,6 @@ import {
   S_AXIS,
   decaySpectrum,
   injectIntent,
-  exciteWorkingMemory,
   computeDynamicCh,
   interpolateResonantHeat,
   computeEpistemicHealth,
@@ -20,6 +19,8 @@ import {
   searchMemoryPoints,
   getTimelinePoints,
   updatePointSpectrum,
+  getPointById,
+  setPointPayload,
   QdrantEnv
 } from "./qdrant";
 
@@ -101,6 +102,46 @@ export const MCP_TOOLS = [
         }
       },
       required: ["date"]
+    }
+  },
+  {
+    name: "confirm_memory",
+    description: "【闭环关键工具】当用户确认某条记忆（特别是处于 🟡 临界待核实 状态）仍然有效成立时调用。刷新强验证时间戳 t_last_strong，注入强信号意图热度，使其重归 🟢 确信有效 状态。可选追加更新备注或调整常度。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "待确证的记忆 ID (UUID)"
+        },
+        note: {
+          type: "string",
+          description: "确证补充说明（可选，例如记录用户最新确认时的补充背景）"
+        },
+        c_h: {
+          type: "number",
+          description: "修正或提升的人基常度 C_H (可选，若用户明确其为更长期规则可直接升级)"
+        }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "retire_memory",
+    description: "主动将某条过时、已被推翻或废弃的记忆置为失效（静默沉淀态）。清除能量与常度，归档沉淀，未来检索将自动物理静默，彻底避免幽灵干扰。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "待废弃的记忆 ID (UUID)"
+        },
+        reason: {
+          type: "string",
+          description: "废弃原因（例如：'架构方案已迁移至方案 B' 或 '该传闻已被辟谣'）"
+        }
+      },
+      required: ["id", "reason"]
     }
   },
   {
@@ -210,19 +251,18 @@ export async function executeToolCall(
       // 1. Continuous Lazy Decay from last persistent update to now
       const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
       
-      // 2. Weak Signal (Passive Search Probe):
-      // Only excite short-wave working memory (s=0, 10-minute focus window)
-      // Zero long-wave penetration (k >= 3), strictly preventing artificial C_H inflation
-      const activeH = exciteWorkingMemory(decayedH, 0.4);
-
-      // 3. Compute dynamic C_H and resonant heat
-      // Dynamic C_H remains tied to genuine long-wave consolidation, immune to read probes
+      // 2. Pure read-only evaluation (Zero artificial +0.4 bias!)
       const chDynamic = computeDynamicCh(p.ch_prior || 9.0, decayedH);
-      const resonantHeat = interpolateResonantHeat(activeH, chDynamic);
+      const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
 
-      // 4. Compute Epistemic Health V (t_last_strong is NEVER updated by passive search)
+      // 3. Compute Epistemic Health V (t_last_strong is NEVER updated by passive search)
       const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
       const classification = classifyHealth(V);
+
+      // 4. Semantic similarity score & Composite Ranking
+      const similarityScore = Number((item.score || 0).toFixed(4));
+      // Composite Score: Semantic score is primary; V modulates confidence (0.6 + 0.4 * V)
+      const compositeScore = Number((similarityScore * (0.6 + 0.4 * V)).toFixed(4));
 
       // Note: Passive search does NOT write back to persistent Qdrant!
       // This eliminates write amplification and prevents the "Ghost Resuscitation" feedback loop.
@@ -240,6 +280,8 @@ export async function executeToolCall(
           ch_prior: p.ch_prior,
           ch_dynamic: chDynamic,
           resonant_heat: Number(resonantHeat.toFixed(2)),
+          similarity_score: similarityScore,
+          composite_score: compositeScore,
           validity: V,
           status: classification.status,
           status_badge: classification.badge,
@@ -248,8 +290,8 @@ export async function executeToolCall(
       }
     }
 
-    // Sort by Epistemic Health V descending
-    evaluatedList.sort((a, b) => b.validity - a.validity);
+    // Sort by composite_score descending (balancing semantic relevance and temporal freshness)
+    evaluatedList.sort((a, b) => (b.composite_score || 0) - (a.composite_score || 0));
     const results = evaluatedList.slice(0, limit);
 
     return {
@@ -296,7 +338,98 @@ export async function executeToolCall(
     };
   }
 
-  // 4. Tool: upsert_entity
+  // 4. Tool: confirm_memory
+  if (name === "confirm_memory") {
+    const pointId = (args.id || "").trim();
+    if (!pointId) throw new Error("Missing memory id");
+    const note = (args.note || "").trim();
+    const newCh = typeof args.c_h === "number" ? args.c_h : undefined;
+
+    const point = await getPointById(pointId, env);
+    if (!point || !point.payload || point.payload.user_id !== userId) {
+      throw new Error(`Memory point '${pointId}' not found or unauthorized`);
+    }
+
+    const p = point.payload;
+    // 1. Decay to now
+    const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
+    // 2. Strong Signal Intent Injection
+    const updatedH = injectIntent(decayedH, 1.0);
+    // 3. Update C_H prior if specified
+    const updatedChPrior = newCh !== undefined ? newCh : p.ch_prior;
+    const chDynamic = computeDynamicCh(updatedChPrior, updatedH);
+    const resonantHeat = interpolateResonantHeat(updatedH, chDynamic);
+
+    // 4. Refresh t_last_strong to nowMs!
+    let updatedContent = p.content;
+    if (note) {
+      const dateTag = now.toISOString().slice(0, 10);
+      updatedContent = `${updatedContent}\n\n【核实验证记录 (${dateTag})】: ${note}`;
+    }
+
+    const payloadUpdate: Partial<MemoryPointPayload> & Record<string, any> = {
+      content: updatedContent,
+      ch_prior: updatedChPrior,
+      h_spectrum: updatedH,
+      t_last_update: nowMs,
+      t_last_strong: nowMs
+    };
+
+    await setPointPayload(pointId, payloadUpdate, env);
+
+    const newV = computeEpistemicHealth(chDynamic, resonantHeat, nowMs, nowMs);
+    const classification = classifyHealth(newV);
+
+    return {
+      success: true,
+      id: pointId,
+      c_h: updatedChPrior,
+      ch_dynamic: chDynamic,
+      resonant_heat: Number(resonantHeat.toFixed(2)),
+      validity: newV,
+      status: classification.status,
+      status_badge: classification.badge,
+      message: `✅ 已成功确证记忆 [${pointId}]。强验证时间戳已刷新至当前，状态重归 ${classification.badge}。`
+    };
+  }
+
+  // 5. Tool: retire_memory
+  if (name === "retire_memory") {
+    const pointId = (args.id || "").trim();
+    const reason = (args.reason || "").trim();
+    if (!pointId || !reason) throw new Error("Missing id or reason");
+
+    const point = await getPointById(pointId, env);
+    if (!point || !point.payload || point.payload.user_id !== userId) {
+      throw new Error(`Memory point '${pointId}' not found or unauthorized`);
+    }
+
+    const p = point.payload;
+    const dateTag = now.toISOString().slice(0, 10);
+    const retiredContent = `【已废弃/失效归档 (${dateTag}) - 原因: ${reason}】\n${p.content}`;
+
+    const payloadUpdate: Partial<MemoryPointPayload> & Record<string, any> = {
+      content: retiredContent,
+      type: "retired",
+      ch_prior: 0.0,
+      h_spectrum: new Array(7).fill(0),
+      t_last_update: nowMs,
+      t_last_strong: nowMs - 100000000000 // force V to 0
+    };
+
+    await setPointPayload(pointId, payloadUpdate, env);
+
+    return {
+      success: true,
+      id: pointId,
+      validity: 0.0,
+      status: "DORMANT",
+      status_badge: "⚪ 静默沉淀 (Dormant)",
+      message: `📦 记忆 [${pointId}] 已成功标记为废弃归档。时效健康度置为 0，未来检索将自动静默过滤。`
+    };
+  }
+
+  // 6. Tool: upsert_entity
   if (name === "upsert_entity") {
     const entityName = (args.name || "").trim();
     const desc = (args.description || "").trim();

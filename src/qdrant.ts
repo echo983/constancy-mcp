@@ -147,3 +147,37 @@ export async function updatePointSpectrum(
     })
   });
 }
+
+export async function getPointById(
+  id: string,
+  env: QdrantEnv
+): Promise<{ id: string; payload?: MemoryPointPayload } | null> {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/${id}`;
+  const res = await qdrantFetch(url, env);
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    const errText = await res.text();
+    throw new Error(`Qdrant getPointById error (${res.status}): ${errText}`);
+  }
+  const data: any = await res.json();
+  return data.result || null;
+}
+
+export async function setPointPayload(
+  id: string,
+  payload: Partial<MemoryPointPayload> & Record<string, any>,
+  env: QdrantEnv
+) {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/payload?wait=true`;
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({
+      points: [id],
+      payload
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Qdrant setPointPayload error (${res.status}): ${errText}`);
+  }
+}
