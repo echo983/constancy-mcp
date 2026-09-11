@@ -30,6 +30,8 @@ import { computeBase64Sha256, generateBlobSig } from "./blob";
 export interface McpEnv extends VoyageEnv, QdrantEnv {
   JWT_SECRET: string;
   DOMAIN: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
 }
 
 export const MCP_TOOLS = [
@@ -354,6 +356,66 @@ export const MCP_TOOLS = [
           description: "可选。人基常度 C_H，默认 8.8。"
         }
       }
+    }
+  },
+  {
+    name: "request_image_upload",
+    description: "【申请 Cloudflare Images 直传凭据】预分配 Cloudflare Images 存储 ID 并生成 5 分钟有效的一次性直传 URL。用于 Claude 或客户端在本地沙箱中直接通过 curl 将图片二进制直传至 Cloudflare Images 永久图库，零 Token 上下文传输。上传成功后，请利用大模型原生视觉能力观察画面细节，调用 commit_image_record 将图片入库至后花园 (search.kufof.uk) 并生成关联便签。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filename: {
+          type: "string",
+          description: "可选。原始图片文件名 (例如 'datacenter_rack.jpg' 或 'flowchart.png')"
+        }
+      }
+    }
+  },
+  {
+    name: "commit_image_record",
+    description: "【视觉资产与便签录入】将已上传至 Cloudflare Images 的图片录入 Qdrant 视觉图库（images 集合）并同步在 Constancy 便签库创建一条关联 Note 便签。由 Claude 发挥原生视觉大模型能力生成深度中文描述、识别画面主体细节、文字、坐标与标签。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        image_id: {
+          type: "string",
+          description: "Cloudflare Images 分配的图片 ID (必填)"
+        },
+        description: {
+          type: "string",
+          description: "Claude 对图片的深度视觉描述，包括核心主体、关键细节、招牌/标签文字、环境场景等 (必填)"
+        },
+        title: {
+          type: "string",
+          description: "可选。图片简短标题 (例如 '核心交换机跳线分布图' / '徐家汇商圈夜景')"
+        },
+        filename: {
+          type: "string",
+          description: "可选。原始文件名"
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选。分类标签列表 (例如 ['hardware', 'network', 'cisco'])"
+        },
+        latitude: {
+          type: "number",
+          description: "可选。拍摄地点纬度 (例如 31.2304)"
+        },
+        longitude: {
+          type: "number",
+          description: "可选。拍摄地点经度 (例如 121.4737)"
+        },
+        exif: {
+          type: "object",
+          description: "可选。相机与拍摄参数元数据 (例如 { device, dateTime, lens, iso, aperture })"
+        },
+        create_note: {
+          type: "boolean",
+          description: "可选。是否同步在 Constancy 便签库创建一条关联 Note 便签，默认 true"
+        }
+      },
+      required: ["image_id", "description"]
     }
   }
 ];
@@ -1202,6 +1264,146 @@ export async function executeToolCall(
     };
   }
 
+  // 13. Tool: request_image_upload
+  if (name === "request_image_upload") {
+    const token = env.CLOUDFLARE_API_TOKEN?.trim();
+    const accountId = env.CLOUDFLARE_ACCOUNT_ID?.trim() || "00f6c85f82f6297c8c0bef9460e013d9";
+    if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not configured on MCP server");
+
+    const filename = (args.filename || "image.jpg").trim();
+    const formData = new FormData();
+    formData.append("requireSignedURLs", "false");
+    formData.append("metadata", JSON.stringify({ user_id: userId, filename }));
+
+    const cfRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v2/direct_upload`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`
+      },
+      body: formData
+    });
+
+    if (!cfRes.ok) {
+      const err = await cfRes.text();
+      throw new Error(`Cloudflare Images direct_upload failed (${cfRes.status}): ${err}`);
+    }
+
+    const cfData: any = await cfRes.json();
+    const uploadUrl = cfData.result?.uploadURL;
+    const imageId = cfData.result?.id;
+
+    if (!uploadUrl || !imageId) {
+      throw new Error("Failed to obtain uploadURL from Cloudflare Images");
+    }
+
+    return {
+      success: true,
+      image_id: imageId,
+      upload_url: uploadUrl,
+      filename,
+      instructions: `请在沙箱中使用 curl 执行直接上传：\ncurl -X POST -F "file=@<本地图片绝对路径>" "${uploadUrl}"\n\n上传成功后，请发挥你的视觉大模型能力深度观察画面，然后调用 commit_image_record 工具将该图片录入图库与便签。`
+    };
+  }
+
+  // 14. Tool: commit_image_record
+  if (name === "commit_image_record") {
+    const imageId = (args.image_id || "").trim();
+    if (!imageId) throw new Error("Missing image_id");
+    const description = (args.description || "").trim();
+    if (!description) throw new Error("Missing description");
+
+    const title = (args.title || "").trim();
+    const filename = (args.filename || "image.jpg").trim();
+    const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
+    if (!tags.includes("image")) tags.push("image");
+
+    let location: { lat: number; lon: number } | null = null;
+    if (typeof args.latitude === "number" && typeof args.longitude === "number") {
+      location = { lat: args.latitude, lon: args.longitude };
+    }
+
+    const exif = args.exif && typeof args.exif === "object" ? args.exif : null;
+    const nowIso = now.toISOString();
+
+    // Vectorize description with Voyage Multimodal 3.5 (1024-dim)
+    const textToEmbed = title ? `${title}\n${description}\n${tags.join(" ")}` : `${description}\n${tags.join(" ")}`;
+    const vector = await getEmbedding(textToEmbed, env, "document");
+
+    // 1. Ingest into Qdrant 'images' collection
+    const imagePointId = crypto.randomUUID();
+    const qdrantUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points?wait=true`;
+    const imagePayload = {
+      user_id: userId,
+      image_id: imageId,
+      filename,
+      title: title || filename,
+      description,
+      tags,
+      exif,
+      location,
+      created_at: nowIso,
+      source: "claude"
+    };
+
+    const imageRes = await fetch(qdrantUrl, {
+      method: "PUT",
+      headers: {
+        "api-key": env.QDRANT_API_KEY?.trim(),
+        "Content-Type": "application/json",
+        "User-Agent": "curl/8.14.1 (constancy-mcp worker)"
+      },
+      body: JSON.stringify({
+        points: [
+          {
+            id: imagePointId,
+            vector,
+            payload: imagePayload
+          }
+        ]
+      })
+    });
+
+    if (!imageRes.ok) {
+      const err = await imageRes.text();
+      throw new Error(`Qdrant upsert to 'images' collection failed (${imageRes.status}): ${err}`);
+    }
+
+    // 2. Ingest into Constancy MCP 'constancy_memories' collection as Note
+    let notePointId: string | null = null;
+    const createNote = args.create_note !== false;
+    if (createNote) {
+      notePointId = crypto.randomUUID();
+      const noteTitle = title || `[视觉资产] ${description.slice(0, 24)}...`;
+      const noteContent = `${description}\n\n[Cloudflare Images ID: ${imageId}]`;
+      const notePayload: MemoryPointPayload = {
+        user_id: userId,
+        content: noteContent,
+        timestamp: nowIso,
+        date: todayStr,
+        type: "note",
+        entities: [],
+        tags: ["image", "gallery", ...tags],
+        ch_prior: 11.0, // High constancy for assets
+        h_spectrum: injectIntent(new Array(7).fill(0), 1.0),
+        t_last_update: nowMs,
+        t_last_strong: nowMs,
+        title: noteTitle,
+        mime_type: "image/jpeg"
+      };
+
+      await upsertMemoryPoint(notePointId, vector, notePayload, env);
+    }
+
+    return {
+      success: true,
+      image_id: imageId,
+      point_id: imagePointId,
+      note_id: notePointId,
+      title: title || filename,
+      message: `🖼️ 视觉资产成功入库！已录入后花园 (search.kufof.uk)${createNote ? " 并同步在 Constancy 便签库创建了对应笔记" : ""}。`
+    };
+  }
+
   throw new Error(`Unknown tool: ${name}`);
 }
 
@@ -1228,7 +1430,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.1.0",
+          version: "1.2.0",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }
