@@ -6,7 +6,6 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 QDRANT_URL = "https://vec.kufof.uk"
 DOMAIN = "mcp.kufof.uk"
-JWT_SECRET = "actd-constancy-mcp-secret-key-2026-kufof"
 
 routes = [
   { pattern = "mcp.kufof.uk", custom_domain = true }

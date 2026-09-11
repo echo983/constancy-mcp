@@ -162,14 +162,25 @@ export function classifyHealth(
 
   const isUnverified = tags.some(t => 
     ["unverified", "rumor", "speculation", "hearsay", "传闻", "未证实"].includes(t.toLowerCase())
-  ) || type === "memo";
+  );
+
+  const isPreferenceOrMemo = type === "memo" || tags.some(t => 
+    ["subjective", "preference", "偏好", "习惯"].includes(t.toLowerCase())
+  );
 
   if (V >= 0.7) {
     if (isUnverified) {
       return {
         status: "FRESH",
         badge: "🟢 确信时效 (Fresh / 未证实)",
-        guidance: "该信息处于新鲜时效期内，但其属性为【未证实传闻/主观备忘】。向用户表达时必须明确说明信源背景与未证实属性，严禁断言为既成事实。"
+        guidance: "该信息处于新鲜时效期内，但其属性为【未证实传闻】。向用户表达时必须明确说明信源背景与未证实属性，严禁断言为既成事实。"
+      };
+    }
+    if (isPreferenceOrMemo) {
+      return {
+        status: "FRESH",
+        badge: "🟢 确信偏好 (Fresh / 个人自陈)",
+        guidance: "这是用户关于自身偏好或习惯的自述，具有最高权威，可直接采信作为行为准则（但注意可能随时间演化）。"
       };
     }
     return {

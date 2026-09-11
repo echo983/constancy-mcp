@@ -59,7 +59,7 @@ export default {
     if (url.pathname === "/oauth2/register" && request.method === "POST") {
       return handleRegister(request, env);
     }
-    if (url.pathname === "/oauth2/authorize" && request.method === "GET") {
+    if (url.pathname === "/oauth2/authorize" && (request.method === "GET" || request.method === "POST")) {
       return handleAuthorize(request, env);
     }
     if (url.pathname === "/oauth2/token" && request.method === "POST") {

@@ -8,9 +8,20 @@ export interface AuthEnv {
   JWT_SECRET: string;
   CONSTANCY_KV: KVNamespace;
   ALLOWED_EMAILS?: string;
+  ADMIN_PASSKEY?: string;
 }
 
-// 1. Helpers for base64url and HMAC-SHA256 JWT
+// 1. Helpers for base64url, HMAC-SHA256 JWT, and HTML escaping
+function escapeHtml(str: string | null | undefined): string {
+  if (!str) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function base64UrlEncode(str: string): string {
   return btoa(str).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -61,9 +72,9 @@ export async function verifyJwt(token: string, secret: string): Promise<any | nu
   }
 }
 
-// PKCE S256 verification
+// PKCE S256 verification (OAuth 2.1 strictly requires non-empty PKCE)
 async function verifyPkce(codeVerifier: string, codeChallenge: string): Promise<boolean> {
-  if (!codeChallenge) return true;
+  if (!codeVerifier || !codeChallenge) return false;
   const enc = new TextEncoder();
   const hash = await crypto.subtle.digest("SHA-256", enc.encode(codeVerifier));
   const binary = String.fromCharCode(...new Uint8Array(hash));
@@ -90,7 +101,7 @@ export function getAuthorizationServerMetadata(domain: string) {
     registration_endpoint: `https://${domain}/oauth2/register`,
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code", "refresh_token"],
-    code_challenge_methods_supported: ["S256", "plain"],
+    code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"]
   };
 }
@@ -120,40 +131,54 @@ export async function handleRegister(request: Request, env: AuthEnv): Promise<Re
 // 4. Authorization Endpoint (/oauth2/authorize)
 export async function handleAuthorize(request: Request, env: AuthEnv): Promise<Response> {
   const url = new URL(request.url);
-  const redirectUri = url.searchParams.get("redirect_uri");
-  const state = url.searchParams.get("state") || "";
-  const codeChallenge = url.searchParams.get("code_challenge") || "";
-  const codeChallengeMethod = url.searchParams.get("code_challenge_method") || "S256";
 
-  if (!redirectUri) {
-    return new Response("Missing redirect_uri", { status: 400 });
-  }
+  let redirectUri = url.searchParams.get("redirect_uri") || "";
+  let state = url.searchParams.get("state") || "";
+  let codeChallenge = url.searchParams.get("code_challenge") || "";
+  let codeChallengeMethod = url.searchParams.get("code_challenge_method") || "S256";
+  let clientId = url.searchParams.get("client_id") || "";
+  let submittedEmail = "";
+  let submittedPasskey = "";
+  let isPostSubmission = false;
 
-  // Check Cloudflare Access authenticated email header
-  let userEmail = request.headers.get("cf-access-authenticated-user-email");
-
-  // Fallback for direct browser testing or manual auth param
-  if (!userEmail) {
-    userEmail = url.searchParams.get("user") || url.searchParams.get("email");
-  }
-
-  // Whitelist Verification (Double Defense)
-  if (userEmail && env.ALLOWED_EMAILS) {
-    const whitelist = env.ALLOWED_EMAILS.split(",")
-      .map(e => e.trim().toLowerCase())
-      .filter(Boolean);
-    if (!whitelist.includes(userEmail.toLowerCase().trim())) {
-      return new Response(
-        `<!DOCTYPE html><html><body style="font-family:sans-serif;background:#0f172a;color:#f87171;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;"><div style="background:#1e293b;padding:2rem;border-radius:1rem;max-width:400px;text-align:center;"><h2>❌ 403 访问受限</h2><p style="color:#94a3b8;">邮箱 <b>${userEmail}</b> 不在白名单授权列表中。</p></div></body></html>`,
-        { status: 403, headers: { "Content-Type": "text/html; charset=utf-8" } }
-      );
+  if (request.method === "POST") {
+    isPostSubmission = true;
+    const contentType = request.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const body: any = await request.json().catch(() => ({}));
+      submittedEmail = (body.email || body.user || "").trim().toLowerCase();
+      submittedPasskey = (body.passkey || "").trim();
+      if (body.redirect_uri) redirectUri = body.redirect_uri;
+      if (body.state) state = body.state;
+      if (body.code_challenge) codeChallenge = body.code_challenge;
+      if (body.code_challenge_method) codeChallengeMethod = body.code_challenge_method;
+      if (body.client_id) clientId = body.client_id;
+    } else {
+      const formData = await request.formData().catch(() => new FormData());
+      submittedEmail = (formData.get("email") || formData.get("user") || "").toString().trim().toLowerCase();
+      submittedPasskey = (formData.get("passkey") || "").toString().trim();
+      if (formData.get("redirect_uri")) redirectUri = formData.get("redirect_uri")!.toString();
+      if (formData.get("state")) state = formData.get("state")!.toString();
+      if (formData.get("code_challenge")) codeChallenge = formData.get("code_challenge")!.toString();
+      if (formData.get("code_challenge_method")) codeChallengeMethod = formData.get("code_challenge_method")!.toString();
+      if (formData.get("client_id")) clientId = formData.get("client_id")!.toString();
     }
   }
 
-  const clientId = url.searchParams.get("client_id") || "";
+  // Strict OAuth 2.1 validations
+  if (!redirectUri) {
+    return new Response("Missing redirect_uri", { status: 400 });
+  }
+  if (!codeChallenge || codeChallengeMethod !== "S256") {
+    return new Response("OAuth 2.1 requires code_challenge with code_challenge_method=S256", { status: 400 });
+  }
 
-  // If still not authenticated, show lightweight authorization confirmation screen
-  if (!userEmail) {
+  // Function to render the authorization card with XSS protection
+  const renderCard = (errorMessage?: string) => {
+    const errorBanner = errorMessage
+      ? `<div style="background:#450a0a;border:1px solid #ef4444;color:#fca5a5;padding:0.75rem 1rem;border-radius:0.5rem;margin-bottom:1.25rem;font-size:0.9rem;">${escapeHtml(errorMessage)}</div>`
+      : "";
+
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -161,40 +186,79 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Constancy MCP 授权确认</title>
   <style>
-    body { font-family: -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
-    .card { background: #1e293b; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 420px; width: 90%; border: 1px solid #334155; }
-    h2 { margin-top: 0; color: #38bdf8; display: flex; align-items: center; gap: 0.5rem; }
-    p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; }
-    input[type="email"] { width: 100%; padding: 0.75rem; border-radius: 0.5rem; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; margin-bottom: 1.25rem; font-size: 1rem; }
-    button { width: 100%; padding: 0.85rem; border-radius: 0.5rem; border: none; background: #38bdf8; color: #0f172a; font-weight: bold; font-size: 1rem; cursor: pointer; transition: background 0.2s; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; box-sizing: border-box; }
+    .card { background: #1e293b; padding: 2.5rem; border-radius: 1rem; box-shadow: 0 10px 25px rgba(0,0,0,0.5); max-width: 440px; width: 100%; border: 1px solid #334155; box-sizing: border-box; }
+    h2 { margin-top: 0; color: #38bdf8; display: flex; align-items: center; gap: 0.5rem; font-size: 1.4rem; }
+    p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin-bottom: 1.25rem; }
+    .field { margin-bottom: 1.25rem; text-align: left; }
+    label { display: block; font-size: 0.85rem; color: #cbd5e1; margin-bottom: 0.4rem; font-weight: 500; }
+    input { width: 100%; padding: 0.75rem 1rem; border-radius: 0.5rem; border: 1px solid #475569; background: #0f172a; color: #fff; box-sizing: border-box; font-size: 1rem; outline: none; transition: border-color 0.2s; }
+    input:focus { border-color: #38bdf8; }
+    button { width: 100%; padding: 0.85rem; border-radius: 0.5rem; border: none; background: #38bdf8; color: #0f172a; font-weight: bold; font-size: 1rem; cursor: pointer; transition: background 0.2s; margin-top: 0.5rem; }
     button:hover { background: #7dd3fc; }
   </style>
 </head>
 <body>
   <div class="card">
     <h2>🧬 Constancy MCP</h2>
-    <p>Claude 请求连接到您的<b>人基常热认知外脑 (ACTD)</b>。<br>请输入您绑定的管理员邮箱以完成单设备 1 年长效授权：</p>
-    <form method="GET" action="/oauth2/authorize">
-      <input type="hidden" name="client_id" value="${clientId}">
-      <input type="hidden" name="redirect_uri" value="${redirectUri}">
-      <input type="hidden" name="state" value="${state}">
-      <input type="hidden" name="code_challenge" value="${codeChallenge}">
-      <input type="hidden" name="code_challenge_method" value="${codeChallengeMethod}">
-      <input type="email" name="user" placeholder="your-email@example.com" required autofocus>
+    <p>Claude 请求连接到您的<b>人基常热认知外脑 (ACTD)</b>。<br>请输入管理员邮箱与授权口令完成单设备 1 年免密连接：</p>
+    ${errorBanner}
+    <form method="POST" action="/oauth2/authorize">
+      <input type="hidden" name="client_id" value="${escapeHtml(clientId)}">
+      <input type="hidden" name="redirect_uri" value="${escapeHtml(redirectUri)}">
+      <input type="hidden" name="state" value="${escapeHtml(state)}">
+      <input type="hidden" name="code_challenge" value="${escapeHtml(codeChallenge)}">
+      <input type="hidden" name="code_challenge_method" value="${escapeHtml(codeChallengeMethod)}">
+      <div class="field">
+        <label>管理员邮箱 (Admin Email)</label>
+        <input type="email" name="email" value="${escapeHtml(submittedEmail)}" placeholder="edwin.abel.3@gmail.com" required autofocus>
+      </div>
+      <div class="field">
+        <label>授权口令 (Admin Passkey)</label>
+        <input type="password" name="passkey" placeholder="请输入系统预设口令" required>
+      </div>
       <button type="submit">授权连接 Claude (1 年免密)</button>
     </form>
   </div>
 </body>
 </html>`;
     return new Response(html, {
+      status: errorMessage ? 401 : 200,
       headers: { "Content-Type": "text/html; charset=utf-8" }
     });
+  };
+
+  // If GET request, display authentication form directly (unauthenticated query param bypass is completely eliminated)
+  if (!isPostSubmission) {
+    return renderCard();
+  }
+
+  // POST Submission Verification
+  // 1. Verify Passkey
+  if (env.ADMIN_PASSKEY) {
+    if (!submittedPasskey || submittedPasskey !== env.ADMIN_PASSKEY) {
+      return renderCard("❌ 授权口令 (Passkey) 错误，拒绝颁发访问令牌。");
+    }
+  }
+
+  // 2. Verify Email Whitelist
+  if (!submittedEmail) {
+    return renderCard("❌ 请输入有效的管理员邮箱。");
+  }
+
+  if (env.ALLOWED_EMAILS) {
+    const whitelist = env.ALLOWED_EMAILS.split(",")
+      .map(e => e.trim().toLowerCase())
+      .filter(Boolean);
+    if (!whitelist.includes(submittedEmail)) {
+      return renderCard(`❌ 邮箱 "${submittedEmail}" 不在管理员白名单中，拒绝接入。`);
+    }
   }
 
   // Issue Authorization Code
   const code = "code_" + crypto.randomUUID().replace(/-/g, "");
   const codeData = {
-    user_id: userEmail.toLowerCase().trim(),
+    user_id: submittedEmail,
     code_challenge: codeChallenge,
     code_challenge_method: codeChallengeMethod,
     redirect_uri: redirectUri
@@ -245,15 +309,24 @@ export async function handleToken(request: Request, env: AuthEnv): Promise<Respo
     await env.CONSTANCY_KV.delete(`auth_code:${code}`);
     const codeData = JSON.parse(codeRaw);
 
-    // Verify PKCE
-    if (codeData.code_challenge) {
-      const valid = await verifyPkce(codeVerifier, codeData.code_challenge);
-      if (!valid) {
-        return new Response(JSON.stringify({ error: "invalid_grant", error_description: "PKCE verification failed" }), { status: 400 });
-      }
+    // Verify PKCE (Strict OAuth 2.1)
+    if (!codeData.code_challenge || !codeVerifier) {
+      return new Response(JSON.stringify({ error: "invalid_grant", error_description: "Missing PKCE challenge or verifier" }), { status: 400 });
+    }
+    const valid = await verifyPkce(codeVerifier, codeData.code_challenge);
+    if (!valid) {
+      return new Response(JSON.stringify({ error: "invalid_grant", error_description: "PKCE verification failed" }), { status: 400 });
     }
 
     const userId = codeData.user_id;
+
+    // Check whitelist on token issuance
+    if (env.ALLOWED_EMAILS) {
+      const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+      if (!whitelist.includes(userId.toLowerCase())) {
+        return new Response(JSON.stringify({ error: "access_denied", error_description: "User not in whitelist" }), { status: 403 });
+      }
+    }
 
     // Issue 1-Year Access Token (31,536,000 seconds)
     const expiresIn = 31536000;
@@ -287,6 +360,15 @@ export async function handleToken(request: Request, env: AuthEnv): Promise<Respo
     const userId = await env.CONSTANCY_KV.get(`refresh:${refreshToken}`);
     if (!userId) {
       return new Response(JSON.stringify({ error: "invalid_grant", error_description: "Invalid refresh token" }), { status: 400 });
+    }
+
+    // Check whitelist on token renewal
+    if (env.ALLOWED_EMAILS) {
+      const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+      if (!whitelist.includes(userId.toLowerCase())) {
+        await env.CONSTANCY_KV.delete(`refresh:${refreshToken}`);
+        return new Response(JSON.stringify({ error: "access_denied", error_description: "User revoked or not in whitelist" }), { status: 403 });
+      }
     }
 
     const expiresIn = 31536000;
@@ -329,6 +411,14 @@ export async function authenticateRequest(request: Request, env: AuthEnv): Promi
 
   const payload = await verifyJwt(token, env.JWT_SECRET);
   if (!payload || !payload.sub) return null;
+
+  // Real-time Whitelist Enforcement on EVERY request
+  if (env.ALLOWED_EMAILS) {
+    const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
+    if (!whitelist.includes((payload.sub as string).toLowerCase().trim())) {
+      return null;
+    }
+  }
 
   return payload.sub as string;
 }
