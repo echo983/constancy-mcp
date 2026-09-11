@@ -3,9 +3,10 @@
  * Bypasses LLM token window by allowing direct HTTP GET and PUT of binary attachments.
  */
 
-import { getPointById, setPointPayload, QdrantEnv } from "./qdrant";
+import { getPointById, setPointPayload, upsertMemoryPoint, QdrantEnv } from "./qdrant";
+import { getEmbedding, VoyageEnv } from "./voyage";
 
-export interface BlobEnv extends QdrantEnv {
+export interface BlobEnv extends QdrantEnv, VoyageEnv {
   JWT_SECRET: string;
   DOMAIN: string;
 }
@@ -258,18 +259,46 @@ export async function handleBlobRequest(
       }
     }
 
-    await setPointPayload(
-      blobId,
-      {
-        base64,
-        sha256,
-        mime_type: mimeType,
-        revisions,
-        t_last_update: nowMs,
-        t_last_strong: nowMs
-      },
-      env
-    );
+    const updatedPayload = {
+      ...point.payload,
+      base64,
+      sha256,
+      mime_type: mimeType,
+      revisions,
+      t_last_update: nowMs,
+      t_last_strong: nowMs
+    };
+
+    let revectorized = false;
+    try {
+      const textToEmbed = point.payload.title
+        ? `${point.payload.title}\n${point.payload.content || ""}`
+        : (point.payload.content || "");
+      const isImage = mimeType.startsWith("image/");
+      const vector = await getEmbedding(
+        isImage
+          ? { text: textToEmbed, imageBase64: base64, mimeType }
+          : textToEmbed,
+        env,
+        "document"
+      );
+      await upsertMemoryPoint(blobId, vector, updatedPayload, env);
+      revectorized = true;
+    } catch (embErr) {
+      console.warn("Re-vectorization on blob PUT fallback to setPointPayload:", embErr);
+      await setPointPayload(
+        blobId,
+        {
+          base64,
+          sha256,
+          mime_type: mimeType,
+          revisions,
+          t_last_update: nowMs,
+          t_last_strong: nowMs
+        },
+        env
+      );
+    }
 
     return new Response(
       JSON.stringify({

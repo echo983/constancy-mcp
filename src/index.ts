@@ -161,7 +161,7 @@ export default {
     if (url.pathname === "/api/health") {
       return jsonResponse({
         status: "healthy",
-        version: "1.1.0",
+        version: "1.2.0",
         domain,
         time: new Date().toISOString(),
         qdrant_target: env.QDRANT_URL
@@ -193,7 +193,7 @@ export default {
 <body>
   <div class="container">
     <h1>🧬 Constancy MCP Server <span class="badge">ACTD v1.0</span></h1>
-    <p>基于<b>人基常热动力学（Anthropocentric Chrono-Thermal Dynamics）</b>的数字海马体记忆外脑。支持“主动记、自动忘、懂分寸、读空气”。</p>
+    <p>基于<b>人基常热动力学（Anthropocentric Chrono-Thermal Dynamics）</b>的数字海马体记忆外脑。支持“主动记、自动忘、懂分寸、读空气”，基于 <code>Voyage-Multimodal-3.5</code> 统一度量衡实现图文同构检索。</p>
     
     <p>运行状态：<span class="status-ok">● 正常运行 (Online)</span> | 域名：<code>${domain}</code></p>
 
@@ -205,7 +205,7 @@ https://${domain}/sse (Legacy SSE)</pre>
 
     <h3>内置核心工具 (Tools)</h3>
     <ul>
-      <li><b>log_memory / search_memory</b>: 认知碎片提炼与 ACTD 时效仲裁检索</li>
+      <li><b>log_memory / search_memory</b>: 认知碎片提炼、Voyage-Multimodal-3.5 多模态图文检索与 ACTD 时效仲裁</li>
       <li><b>save_note / get_note / list_notes / update_note</b>: 极简便签记事本、标签枚举待办与版本审计</li>
       <li><b>get_blob_url / create_upload_url</b>: S3 风格 Capability 直传直下，沙箱零 Token 传输二进制</li>
       <li><b>get_daily_timeline</b>: 提取某日时间线碎片，供大模型生成每日研发日记（DevLog）</li>

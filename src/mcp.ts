@@ -95,6 +95,14 @@ export const MCP_TOOLS = [
         include_retired: {
           type: "boolean",
           description: "是否包含已主动废弃/归档的记忆。默认 false (物理屏蔽，彻底避免幽灵干扰)"
+        },
+        image_url: {
+          type: "string",
+          description: "多模态检索：提供图片的公开或签名 URL，与 query 联合进行跨模态语义检索 (可选)"
+        },
+        image_base64: {
+          type: "string",
+          description: "多模态检索：提供图片的 Base64 编码数据 (支持 PNG/JPEG/WEBP/GIF，可选)"
         }
       },
       required: ["query"]
@@ -408,12 +416,19 @@ export async function executeToolCall(
   // 2. Tool: search_memory
   if (name === "search_memory") {
     const query = (args.query || "").trim();
-    if (!query) throw new Error("Missing query");
+    const imageUrl = (args.image_url || "").trim() || undefined;
+    const imageBase64 = (args.image_base64 || "").trim() || undefined;
+    if (!query && !imageUrl && !imageBase64) throw new Error("Missing query or image input");
+
     const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
     const minValidity = typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2;
     const includeRetired = Boolean(args.include_retired);
 
-    const queryVector = await getEmbedding(query, env, "query");
+    const queryInput = (imageUrl || imageBase64)
+      ? { text: query, imageUrl, imageBase64 }
+      : query;
+
+    const queryVector = await getEmbedding(queryInput, env, "query");
     const candidates = await searchMemoryPoints(queryVector, userId, limit * 3, env, {
       type: args.type,
       entity: args.entity
@@ -775,9 +790,16 @@ export async function executeToolCall(
       sha256 = await computeBase64Sha256(base64);
     }
 
-    // Pure semantic embedding: embed title + content, strictly omit base64
+    // Multimodal semantic embedding: embed title + content, and include image payload if image attachment
     const textToEmbed = title ? `${title}\n${content}` : content;
-    const vector = await getEmbedding(textToEmbed, env, "document");
+    const hasImage = Boolean(base64 && mimeType.startsWith("image/"));
+    const vector = await getEmbedding(
+      hasImage
+        ? { text: textToEmbed, imageBase64: base64, mimeType }
+        : textToEmbed,
+      env,
+      "document"
+    );
 
     const initialSpectrum = injectIntent(new Array(7).fill(0), 1.0);
     const pointId = crypto.randomUUID();
@@ -1049,9 +1071,16 @@ export async function executeToolCall(
       p.h_spectrum = injectIntent(decayedH, 1.0);
       p.t_last_strong = nowMs;
 
-      // Re-vectorize
+      // Re-vectorize with multimodal support
       const textToEmbed = newTitle ? `${newTitle}\n${newContent}` : newContent;
-      const vector = await getEmbedding(textToEmbed, env, "document");
+      const hasImage = Boolean(newBase64 && newMimeType.startsWith("image/"));
+      const vector = await getEmbedding(
+        hasImage
+          ? { text: textToEmbed, imageBase64: newBase64, mimeType: newMimeType }
+          : textToEmbed,
+        env,
+        "document"
+      );
       await upsertMemoryPoint(pointId, vector, p, env);
     } else {
       await setPointPayload(pointId, p, env);
