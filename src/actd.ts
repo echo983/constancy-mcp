@@ -26,6 +26,11 @@ export interface MemoryPointPayload {
   retired?: boolean;
   retired_at?: string;
   retired_reason?: string;
+
+  // Optional Note & Raw Scratchpad Fields
+  title?: string;
+  base64?: string;
+  mime_type?: string;
 }
 
 export type HealthStatus = "FRESH" | "DRIFTING" | "DORMANT";
@@ -50,6 +55,11 @@ export interface EvaluatedMemory {
   retired?: boolean;
   retired_at?: string;
   retired_reason?: string;
+
+  // Optional Note & Raw Scratchpad Fields
+  title?: string;
+  base64?: string;
+  mime_type?: string;
 }
 
 /**
@@ -158,6 +168,29 @@ export function classifyHealth(
       badge: "⚪ 已废弃归档 (Retired)",
       guidance: `⚠️ 该记录已被主动标记废弃（原因: ${retiredReason || "无"}），仅作历史审计，严禁作为有效事实使用！`
     };
+  }
+
+  // Handle Raw Notes & Objective Stubs
+  if (type === "note") {
+    if (V >= 0.7) {
+      return {
+        status: "FRESH",
+        badge: "📝 原始便签 (Raw Note / 存根)",
+        guidance: "这是用户或系统原样记录的便签/客观存根，保留了第一手原话与数据，可直接原样采信使用。"
+      };
+    } else if (V >= 0.2) {
+      return {
+        status: "DRIFTING",
+        badge: "🟡 临界便签 (Drifting Note)",
+        guidance: "该便签/存根已跨越预期时效期，若涉及具体待办或临时配置，请向用户核实是否仍然有效。"
+      };
+    } else {
+      return {
+        status: "DORMANT",
+        badge: "⚪ 静默沉淀 (Dormant)",
+        guidance: "该便签处于休眠过期状态，常规场景应被静默过滤。"
+      };
+    }
   }
 
   const isUnverified = tags.some(t => 

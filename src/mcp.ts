@@ -183,6 +183,41 @@ export const MCP_TOOLS = [
       },
       required: ["name", "description"]
     }
+  },
+  {
+    name: "save_note",
+    description: "【极简记事本/客观存根】当用户要求'帮我记着点...'、需要原汁原味记录一段备忘/代码/URI，或者 LLM 自身需要工具性准确存储数据片段时调用。内容原样忠实保存（上限 10KB），支持可选的独立 BASE64 槽（上限 10KB，不参与向量化）。常度与生命周期由调用者自由控制。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        content: {
+          type: "string",
+          description: "核心记录内容（用户的原话、待办备忘、指令、代码片段、URI 等）。原样保存，上限 10KB。"
+        },
+        title: {
+          type: "string",
+          description: "可选。简短标题或语义描述（例如'本地MinIO服务地址'、'猫咪咖啡店位置'），帮助未来更精准召回。"
+        },
+        base64: {
+          type: "string",
+          description: "可选。专属二进制载荷槽（如小图片/图标的 Base64 字符串、小数据指纹）。上限 10KB，不参与向量化，纯作为物理存根保留。"
+        },
+        mime_type: {
+          type: "string",
+          description: "可选。若提供了 base64，注明数据类型（例如 'image/png', 'image/jpeg', 'application/json' 等）"
+        },
+        c_h: {
+          type: "number",
+          description: "可选人基常度 C_H。由 LLM 自由评估：7.8=短期临时便签; 8.8=本周待办; 11.0=长期常青存根。默认 11.0。"
+        },
+        tags: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选。自由分类/状态标签（例如 ['todo', 'config']，也可以打 ['已办', '存档', '过时']）"
+        }
+      },
+      required: ["content"]
+    }
   }
 ];
 
@@ -291,7 +326,10 @@ export async function executeToolCall(
           prompt_guidance: classification.guidance,
           retired: true,
           retired_at: p.retired_at,
-          retired_reason: p.retired_reason
+          retired_reason: p.retired_reason,
+          title: p.title || undefined,
+          base64: p.base64 || undefined,
+          mime_type: p.mime_type || undefined
         });
         continue;
       }
@@ -330,7 +368,10 @@ export async function executeToolCall(
           validity: V,
           status: classification.status,
           status_badge: classification.badge,
-          prompt_guidance: classification.guidance
+          prompt_guidance: classification.guidance,
+          title: p.title || undefined,
+          base64: p.base64 || undefined,
+          mime_type: p.mime_type || undefined
         });
       }
     }
@@ -374,7 +415,10 @@ export async function executeToolCall(
           status: classification.status,
           status_badge: classification.badge,
           retired: true,
-          retired_reason: payload.retired_reason
+          retired_reason: payload.retired_reason,
+          title: payload.title || undefined,
+          base64: payload.base64 || undefined,
+          mime_type: payload.mime_type || undefined
         });
         continue;
       }
@@ -397,7 +441,10 @@ export async function executeToolCall(
         resonant_heat: Number(resonantHeat.toFixed(2)),
         validity: V,
         status: classification.status,
-        status_badge: classification.badge
+        status_badge: classification.badge,
+        title: payload.title || undefined,
+        base64: payload.base64 || undefined,
+        mime_type: payload.mime_type || undefined
       });
     }
 
@@ -555,6 +602,71 @@ export async function executeToolCall(
       entity: entityName,
       c_h: chPrior,
       message: `🏛️ 已成功将实体 '${entityName}' 固化至核心实体百科清单 (常度: 11.5，百年基石级)`
+    };
+  }
+
+  // 7. Tool: save_note
+  if (name === "save_note") {
+    const content = (args.content || "").trim();
+    if (!content) throw new Error("Missing content");
+    if (content.length > 10240) {
+      throw new Error(`content 超过 10KB 限制 (当前: ${content.length} 字符)。便签请保持轻量，大文件请使用专用对象存储服务。`);
+    }
+
+    const title = (args.title || "").trim();
+    if (title.length > 256) {
+      throw new Error(`title 超过 256 字符限制 (当前: ${title.length} 字符)。`);
+    }
+
+    const base64 = (args.base64 || "").trim();
+    if (base64.length > 10240) {
+      throw new Error(`base64 载荷超过 10KB 限制 (当前: ${base64.length} 字符)。如需上传大图或大文件，请使用专用图库/存储服务。`);
+    }
+
+    const mimeType = (args.mime_type || "").trim();
+    const chPrior = typeof args.c_h === "number" ? args.c_h : 11.0;
+    const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
+    if (!tags.includes("note")) tags.push("note");
+
+    // Pure semantic embedding: embed title + content, strictly omit base64
+    const textToEmbed = title ? `${title}\n${content}` : content;
+    const vector = await getEmbedding(textToEmbed, env, "document");
+
+    const initialSpectrum = injectIntent(new Array(7).fill(0), 1.0);
+    const pointId = crypto.randomUUID();
+
+    const payload: MemoryPointPayload = {
+      user_id: userId,
+      content,
+      timestamp: now.toISOString(),
+      date: todayStr,
+      type: "note",
+      entities: [],
+      tags,
+      ch_prior: chPrior,
+      h_spectrum: initialSpectrum,
+      t_last_update: nowMs,
+      t_last_strong: nowMs,
+      title: title || undefined,
+      base64: base64 || undefined,
+      mime_type: mimeType || undefined
+    };
+
+    await upsertMemoryPoint(pointId, vector, payload, env);
+
+    const expectedHours = (Math.pow(10, chPrior) / 3600000).toFixed(1);
+    return {
+      success: true,
+      id: pointId,
+      type: "note",
+      c_h: chPrior,
+      title: title || undefined,
+      has_base64: Boolean(base64),
+      base64_length: base64 ? base64.length : 0,
+      mime_type: mimeType || undefined,
+      tags,
+      stable_expected: `约 ${expectedHours} 小时`,
+      message: `📝 已原样存入记事本 [ID: ${pointId}, 常度: ${chPrior}${base64 ? `, 附带 ${base64.length} 字符 BASE64 载荷` : ""}]`
     };
   }
 

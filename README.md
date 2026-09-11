@@ -90,6 +90,8 @@ graph TD
    * **抗熵归档工具**：显式设置 `retired: true`，保留原业务分类 `type`，将已过时或已被推翻的记忆标记失效沉淀 ($V \to 0$)，杜绝死灰复燃。
 6. `upsert_entity(name, description, aliases?, relations?)`  
    * 维护跨越周期的高阶常青实体百科清单 ($C_H \ge 11.0$)。
+7. `save_note(content, title?, base64?, mime_type?, c_h?, tags?)`  
+   * **极简记事本/客观存根**：专为“书记官记录”（用户交代“帮我记着点……”）与“LLM 工具性存根”（URI、代码片段、数据指纹）设计，原汁原味保存（上限 10KB），绝不作有损改写。支持可选的独立 BASE64 槽（上限 10KB，不参与向量化，零语义污染），常度与标签由调用者自由管理。
 
 ---
 
