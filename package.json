@@ -1,18 +1,27 @@
 {
   "name": "constancy-mcp",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server on Cloudflare Workers",
   "main": "src/index.ts",
   "scripts": {
     "deploy": "wrangler deploy",
-    "dev": "wrangler dev"
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
+    "test:doctor": "tsx scripts/test_cognitive_hygiene.ts"
   },
-  "keywords": ["mcp", "anthropocentric", "constancy", "ai-memory", "qdrant", "cloudflare-workers"],
+  "keywords": [
+    "mcp",
+    "anthropocentric",
+    "constancy",
+    "ai-memory",
+    "qdrant",
+    "cloudflare-workers"
+  ],
   "author": "echo983",
   "license": "MIT",
-  "dependencies": {},
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240909.0",
+    "tsx": "^4.23.13",
     "typescript": "^5.5.4",
     "wrangler": "^3.114.17"
   }
