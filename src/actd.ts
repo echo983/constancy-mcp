@@ -169,6 +169,7 @@ export interface EvaluatedMemory {
   superseded_by?: string;
   predecessor?: string;
   memory_status?: "active" | "expired" | "superseded";
+  pending_user_confirmation?: boolean;
 
   // Provenance & Annotations
   source?: MemorySourceType;

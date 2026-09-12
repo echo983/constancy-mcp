@@ -73,6 +73,7 @@ export interface StructuredSearchFilter {
   date_from?: string;
   date_to?: string;
   near?: NearGeoFilter | null;
+  pending_confirmation_only?: boolean;
 }
 
 export function parseDateFilter(dateStr?: string, isEnd = false): string | null {
@@ -178,6 +179,9 @@ export async function searchMemoryPoints(
   }
   if (extraFilter?.entity) {
     mustFilters.push({ key: "entities", match: { value: extraFilter.entity } });
+  }
+  if (extraFilter?.pending_confirmation_only) {
+    mustFilters.push({ key: "pending_user_confirmation", match: { value: true } });
   }
 
   // Structured Date Range Filter (applies to timestamp or captured_at)

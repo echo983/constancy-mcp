@@ -411,7 +411,51 @@ async function run() {
     }
     console.log("✅ MERGE treatment successfully verified!");
 
-    console.log("\n🎉 ALL 13 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
+    // -------------------------------------------------------------
+    // Test 14: User consultation query & confirm_memory closure
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 14] Testing pending_confirmation_only query & user confirmation ---");
+    // a. Query memories waiting for user confirmation
+    const pendingConsultations = await executeToolCall("search_memory", {
+      pending_confirmation_only: true,
+      limit: 10
+    }, testUserId, env);
+
+    console.log("Pending consultations count:", pendingConsultations.count);
+    const foundEscalated = pendingConsultations.memories.find((m: any) => m.id === memEscalate.id);
+    if (!foundEscalated) {
+      throw new Error("Expected to find escalated memory in pending_confirmation_only search");
+    }
+    if (!foundEscalated.pending_user_confirmation) {
+      throw new Error("Expected pending_user_confirmation to be true in search result");
+    }
+    console.log(`✅ Found pending user consultation for memory [${memEscalate.id}]!`);
+
+    // b. User confirms the memory via confirm_memory
+    const userConfirmRes = await executeToolCall("confirm_memory", {
+      id: memEscalate.id,
+      note: "用户当面确认合作关系正常，之前只是闹情绪"
+    }, testUserId, env);
+    if (!userConfirmRes.success) throw new Error("Expected confirm_memory to succeed");
+
+    const memAfterUserConfirm = await getPointById(memEscalate.id, env);
+    if (memAfterUserConfirm.payload?.pending_user_confirmation) {
+      throw new Error("Expected pending_user_confirmation to be cleared after user confirm");
+    }
+    console.log("✅ pending_user_confirmation cleared on memory point!");
+
+    // c. Query again, it should no longer be pending
+    const pendingConsultationsAfter = await executeToolCall("search_memory", {
+      pending_confirmation_only: true,
+      limit: 10
+    }, testUserId, env);
+    const foundAfter = pendingConsultationsAfter.memories.find((m: any) => m.id === memEscalate.id);
+    if (foundAfter) {
+      throw new Error("Escalated memory should no longer be in pending_confirmation_only search");
+    }
+    console.log("✅ User confirmation loop fully closed!");
+
+    console.log("\n🎉 ALL 14 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
 
   } finally {
     // -------------------------------------------------------------

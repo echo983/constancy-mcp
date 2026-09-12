@@ -202,6 +202,10 @@ export const MCP_TOOLS = [
         image_base64: {
           type: "string",
           description: "多模态检索：提供图片的 Base64 编码数据 (支持 PNG/JPEG/WEBP/GIF，可选)"
+        },
+        pending_confirmation_only: {
+          type: "boolean",
+          description: "可选。若为 true，仅检索由医生升级转交至用户、等待用户主权裁决的疑难记忆点 (ESCALATED_TO_USER)"
         }
       },
       required: []
@@ -733,17 +737,18 @@ export async function executeToolCall(
     const typeFilter = (args.type || "").trim();
     const entity = (args.entity || "").trim() || undefined;
 
-    const hasStructuredFilter = Boolean(dateFrom || dateTo || near || (typeFilter && typeFilter !== "all") || entity);
+    const pendingConfirmationOnly = Boolean(args.pending_confirmation_only);
+    const hasStructuredFilter = Boolean(dateFrom || dateTo || near || (typeFilter && typeFilter !== "all") || entity || pendingConfirmationOnly);
 
     if (!query && !imageUrl && !imageBase64 && !hasStructuredFilter) {
-      throw new Error("Missing query, image input, or structured filter (date_from, date_to, near, entity)");
+      throw new Error("Missing query, image input, or structured filter (date_from, date_to, near, entity, pending_confirmation_only)");
     }
 
     const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
-    const minValidity = typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2;
+    const minValidity = pendingConfirmationOnly ? 0.0 : (typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2);
     const includeRetired = Boolean(args.include_retired);
     const isImageOnly = typeFilter === "image";
-    const includeImages = args.include_images !== false && (typeFilter === "" || typeFilter === "all" || typeFilter === "image");
+    const includeImages = !pendingConfirmationOnly && args.include_images !== false && (typeFilter === "" || typeFilter === "all" || typeFilter === "image");
 
     const queryInput = (imageUrl || imageBase64)
       ? { text: query, imageUrl, imageBase64 }
@@ -758,7 +763,8 @@ export async function executeToolCall(
       entity,
       date_from: dateFrom || undefined,
       date_to: dateTo || undefined,
-      near
+      near,
+      pending_confirmation_only: pendingConfirmationOnly || undefined
     };
 
     const searchMemoriesPromise = isImageOnly
@@ -818,6 +824,7 @@ export async function executeToolCall(
           memory_status: p.status || "expired",
           superseded_by: p.superseded_by,
           predecessor: p.predecessor,
+          pending_user_confirmation: Boolean(p.pending_user_confirmation),
           title: p.title || undefined,
           image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
@@ -869,6 +876,7 @@ export async function executeToolCall(
           memory_status: p.status || "active",
           superseded_by: p.superseded_by,
           predecessor: p.predecessor,
+          pending_user_confirmation: Boolean(p.pending_user_confirmation),
           title: p.title || undefined,
           image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
@@ -1072,10 +1080,17 @@ export async function executeToolCall(
       t_last_strong: nowMs,
       retired: false,
       retired_at: undefined,
-      retired_reason: undefined
+      retired_reason: undefined,
+      pending_user_confirmation: false,
+      suspicion_count: 0,
+      status: "active"
     };
 
     await setPointPayload(pointId, payloadUpdate, env);
+
+    if (p.pending_user_confirmation) {
+      await updateCaseConcerns(userId, pointId, "USER-CONFIRM", "RESOLVED", "KEEP", "用户本人核实验证确认记忆健康有效", env);
+    }
 
     const newV = computeEpistemicHealth(chDynamic, resonantHeat, nowMs, nowMs);
     const classification = classifyHealth(newV, p.tags || [], p.type || "", false, "");
@@ -1119,6 +1134,8 @@ export async function executeToolCall(
       retired: true,
       retired_at: new Date().toISOString(),
       retired_reason: reason,
+      status: "expired",
+      pending_user_confirmation: false,
       ch_prior: 0.0,
       h_spectrum: new Array(7).fill(0),
       t_last_update: nowMs,
@@ -1126,6 +1143,10 @@ export async function executeToolCall(
     };
 
     await setPointPayload(pointId, payloadUpdate, env);
+
+    if (p.pending_user_confirmation) {
+      await updateCaseConcerns(userId, pointId, "USER-EXPIRE", "RESOLVED", "EXPIRE", `用户本人核实验证并宣告失效归档: ${reason}`, env);
+    }
 
     return {
       success: true,
