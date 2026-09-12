@@ -573,7 +573,7 @@ export async function executeToolCall(
     const tags = Array.isArray(args.tags) ? args.tags : [];
 
     // 门口硬门禁：只有 user_stated 才能建立决策或待办任务！
-    const hasTodoOrAction = tags.some(t => /todo|待办|action|task|计划/i.test(t)) || /待办|TODO/i.test(content);
+    const hasTodoOrAction = tags.some((t: string) => /todo|待办|action|task|计划/i.test(t)) || /待办|TODO/i.test(content);
     if ((type === "decision" || hasTodoOrAction) && source !== "user_stated") {
       throw new Error(
         `❌ 门口硬门禁拦截：只有用户明确陈述 ('user_stated') 才能登记为决策 (decision) 或待办任务 (todo)。当前来源标记为 '${source}'。模型的主动提议或推断请登记为 'insight' / 'memo'，严禁越权替用户设立待办或决策！`
@@ -1164,10 +1164,10 @@ export async function executeToolCall(
     }
 
     const mimeType = (args.mime_type || "").trim();
-    const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
+    const tags = Array.isArray(args.tags) ? args.tags.map((t: any) => String(t).trim()).filter(Boolean) : [];
     if (!tags.includes("note")) tags.push("note");
 
-    const hasConfigOrCheatsheet = tags.some(t => {
+    const hasConfigOrCheatsheet = tags.some((t: string) => {
       const lower = t.toLowerCase();
       return lower.includes("config") || lower.includes("cheatsheet") || lower.includes("速查") || lower.includes("配置");
     });
@@ -1414,7 +1414,7 @@ export async function executeToolCall(
 
     let newTags = p.tags || [];
     if (Array.isArray(args.tags)) {
-      newTags = args.tags.map(t => String(t).trim()).filter(Boolean);
+      newTags = args.tags.map((t: any) => String(t).trim()).filter(Boolean);
       if (!newTags.includes("note")) newTags.push("note");
     }
 
@@ -1462,7 +1462,7 @@ export async function executeToolCall(
 
       // Re-vectorize with multimodal support
       const textToEmbed = newTitle ? `${newTitle}\n${newContent}` : newContent;
-      const hasImage = Boolean(newBase64 && newMimeType.startsWith("image/"));
+      const hasImage = Boolean(newBase64 && newMimeType?.startsWith("image/"));
       const vector = await getEmbedding(
         hasImage
           ? { text: textToEmbed, imageBase64: newBase64, mimeType: newMimeType }
@@ -1592,10 +1592,10 @@ export async function executeToolCall(
     if (content.length > 10240) throw new Error("content exceeds 10KB");
 
     const mimeType = (args.mime_type || "").trim() || "application/octet-stream";
-    const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
+    const tags = Array.isArray(args.tags) ? args.tags.map((t: any) => String(t).trim()).filter(Boolean) : [];
     if (!tags.includes("note")) tags.push("note");
 
-    const hasConfigOrCheatsheet = tags.some(t => {
+    const hasConfigOrCheatsheet = tags.some((t: string) => {
       const lower = t.toLowerCase();
       return lower.includes("config") || lower.includes("cheatsheet") || lower.includes("速查") || lower.includes("配置");
     });
@@ -1726,7 +1726,7 @@ export async function executeToolCall(
 
     const title = (args.title || "").trim();
     const filename = (args.filename || "image.jpg").trim();
-    const tags = Array.isArray(args.tags) ? args.tags.map(t => String(t).trim()).filter(Boolean) : [];
+    const tags = Array.isArray(args.tags) ? args.tags.map((t: any) => String(t).trim()).filter(Boolean) : [];
     if (!tags.includes("image")) tags.push("image");
 
     let location: { lat: number; lon: number } | null = null;
