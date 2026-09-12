@@ -16,7 +16,11 @@ import {
   NoteRevision,
   MemorySourceType,
   MemoryAnnotation,
-  AnnotationKind
+  AnnotationKind,
+  DoctorVerdict,
+  DoctorTreatment,
+  ConcernSeverity,
+  InteractionMode
 } from "./actd";
 import { getEmbedding, VoyageEnv } from "./voyage";
 import {
@@ -37,7 +41,10 @@ import {
   parseNearFilter,
   normalizeIsoDate,
   StructuredSearchFilter,
-  QdrantEnv
+  QdrantEnv,
+  submitConcernToQdrant,
+  getDoctorTriageCases,
+  updateCaseConcerns
 } from "./qdrant";
 import { computeBase64Sha256, generateBlobSig } from "./blob";
 
@@ -543,6 +550,87 @@ export const MCP_TOOLS = [
       },
       required: ["id", "kind", "text"]
     }
+  },
+  {
+    name: "submit_concern",
+    description: "【认知卫生义务】当会话中发现检索出的长期记忆与用户当下的现实直陈存在出入、已过期、彼此冲突或明显存疑时，调用此工具将顾虑提交至私域分诊台。LLM 实例有义务在感知到异常时上报，可自行视情况选择静默提交(silent)、顺带告知用户(informed_user)、或与用户求证后再报(user_confirmed)。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        memory_id: {
+          type: "string",
+          description: "关联的目标记忆 ID (UUID 或 MID 标识)"
+        },
+        reason: {
+          type: "string",
+          description: "病症简述与存疑原因（例如：用户居住地可能已由北京变更为上海）"
+        },
+        evidence: {
+          type: "string",
+          description: "现实证据链（必须包含当前会话中用户的原话引言，禁止凭空臆断）"
+        },
+        severity: {
+          type: "string",
+          enum: ["high", "medium", "low"],
+          description: "严重程度：'high'(明确冲突/违背直陈，排期≤1h)、'medium'(偏好漂移/习惯改变，排期≤6h)、'low'(轻度存疑/细节补充，排期≤24h)"
+        },
+        interaction_mode: {
+          type: "string",
+          enum: ["silent", "informed_user", "user_confirmed"],
+          description: "交互姿态：'silent'(后台静默提交不打扰用户)、'informed_user'(已顺带告知用户)、'user_confirmed'(经与用户当面求证属实后提交，享高优先级)"
+        }
+      },
+      required: ["memory_id", "reason", "evidence", "severity"]
+    }
+  },
+  {
+    name: "get_maintenance_cases",
+    description: "【🩺 认知卫生专职医生专享 - 普通会话严禁调用】获取当前整点已达到分诊水位的认知卫生候诊案件。后台已自动完成高危即时到期、中危6h排期、低危24h汇总以及多重举报升舱计算。若无待办案件返回空列表，医生确认肌体健康后可直接秒级收工。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          description: "单次巡诊最大获取案卷数，默认 5（防超时）"
+        }
+      }
+    }
+  },
+  {
+    name: "resolve_maintenance_case",
+    description: "【🩺 认知卫生专职医生专享 - 普通会话严禁调用】对审理完毕的案卷下达临床处方。支持确诊处置(RESOLVED: 维持KEEP/更新UPDATE/废弃EXPIRE/归并MERGE)、留观跟踪(DEFERRED: 证据不足不妄动刀，等待后续会话进一步证据)或请患者本人会诊(ESCALATED_TO_USER: 疑难重大推至后花园控制台待用户点选确认)。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        case_id: {
+          type: "string",
+          description: "案卷编号 (例如 CASE-A1B2C3D4)"
+        },
+        memory_id: {
+          type: "string",
+          description: "目标记忆点 ID"
+        },
+        verdict: {
+          type: "string",
+          enum: ["RESOLVED", "DEFERRED", "ESCALATED_TO_USER"],
+          description: "医生临床裁决：'RESOLVED'(案情确凿立即施治)、'DEFERRED'(证据不足留观追踪)、'ESCALATED_TO_USER'(疑难重大请患者本人会诊)"
+        },
+        treatment: {
+          type: "string",
+          enum: ["KEEP", "UPDATE", "EXPIRE", "MERGE"],
+          description: "当 verdict 为 RESOLVED 时的具体处置方案：'KEEP'(健康无虞维持原状)、'UPDATE'(对症调药更新内容)、'EXPIRE'(病灶坏死宣告失效)、'MERGE'(归并精简)"
+        },
+        updated_content: {
+          type: "string",
+          description: "若处置方案为 UPDATE，提供修正后的精确记忆文本（纯 Markdown 格式）"
+        },
+        doctor_notes: {
+          type: "string",
+          description: "医生病历小结：诊断依据、事实推演与处方理由（将存入私域不可变审计日志）"
+        }
+      },
+      required: ["case_id", "memory_id", "verdict", "doctor_notes"]
+    }
   }
 ];
 
@@ -722,6 +810,9 @@ export async function executeToolCall(
           retired: true,
           retired_at: p.retired_at,
           retired_reason: p.retired_reason,
+          memory_status: p.status || "expired",
+          superseded_by: p.superseded_by,
+          predecessor: p.predecessor,
           title: p.title || undefined,
           image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
@@ -770,6 +861,9 @@ export async function executeToolCall(
           status: classification.status,
           status_badge: classification.badge,
           prompt_guidance: classification.guidance,
+          memory_status: p.status || "active",
+          superseded_by: p.superseded_by,
+          predecessor: p.predecessor,
           title: p.title || undefined,
           image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
@@ -1888,6 +1982,234 @@ export async function executeToolCall(
       source_badge: getSourceBadge(source),
       total_annotations: updatedPayload.annotations?.length || 1,
       message: `📌 已成功向记忆 '${pointId}' 追加不可变附注 [类型: ${kindEmojiMap[kind]}, 来源: ${getSourceBadge(source)}]。原文一字不动，保留因果可证伪性；后续检索将并置展示更正警示。`
+    };
+  }
+
+  // 16. Tool: submit_concern
+  if (name === "submit_concern") {
+    const memoryId = (args.memory_id || "").trim();
+    const reason = (args.reason || "").trim();
+    const evidence = (args.evidence || "").trim();
+    const severity: ConcernSeverity = args.severity || "medium";
+    const interactionMode: InteractionMode = args.interaction_mode || "silent";
+
+    if (!memoryId) throw new Error("Missing required argument: memory_id");
+    if (!reason) throw new Error("Missing required argument: reason");
+    if (!evidence) throw new Error("Missing required argument: evidence (现实证据链必须包含用户近期原话引言)");
+
+    // Target memory validation
+    const targetPoint = await getPointById(memoryId, env);
+    if (!targetPoint || !targetPoint.payload) {
+      throw new Error(`目标记忆点 '${memoryId}' 未找到，请核实 ID 是否准确。`);
+    }
+
+    const concernId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+
+    const result = await submitConcernToQdrant(
+      {
+        id: concernId,
+        user_id: userId,
+        memory_id: memoryId,
+        reason,
+        evidence,
+        severity,
+        interaction_mode: interactionMode,
+        status: "pending",
+        created_at: nowIso,
+        updated_at: nowIso,
+        duplicate_count: 1,
+        defer_count: 0
+      },
+      env
+    );
+
+    return {
+      success: true,
+      concern_id: result.id,
+      memory_id: memoryId,
+      severity,
+      interaction_mode: interactionMode,
+      status: result.status,
+      duplicate_count: result.duplicate_count,
+      is_new: result.is_new,
+      message: result.is_new
+        ? `✅ 记忆卫生顾虑已成功提交至私域分诊台。专职医生将在下个巡诊周期根据严重程度分级排期介入审理。`
+        : `✅ 目标记忆 '${memoryId}' 再次被上报异常，已自动追加最新证据，累计提报达到 ${result.duplicate_count} 次并动态提升排期水位。`
+    };
+  }
+
+  // 17. Tool: get_maintenance_cases (🩺 医生专用)
+  if (name === "get_maintenance_cases") {
+    const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
+    const triageResult = await getDoctorTriageCases(userId, limit, env);
+
+    if (!triageResult.has_cases) {
+      return {
+        has_cases: false,
+        case_count: 0,
+        message: "🩺 巡诊确认完毕：当前私域分诊台无达到排期水位的候诊案卷，外脑记忆肌体运行健康良好。",
+        cases: []
+      };
+    }
+
+    return {
+      has_cases: true,
+      case_count: triageResult.case_count,
+      message: `🩺 本次巡诊共检索出 ${triageResult.case_count} 宗达到分诊水位的认知卫生候诊案件，请医生调阅旧病历与证据链下达临床处方。`,
+      cases: triageResult.cases
+    };
+  }
+
+  // 18. Tool: resolve_maintenance_case (🩺 医生专用)
+  if (name === "resolve_maintenance_case") {
+    const caseId = (args.case_id || "").trim();
+    const memoryId = (args.memory_id || "").trim();
+    const verdict: DoctorVerdict = args.verdict;
+    const treatment: DoctorTreatment | undefined = args.treatment;
+    const updatedContent = (args.updated_content || "").trim();
+    const doctorNotes = (args.doctor_notes || "").trim();
+
+    if (!caseId) throw new Error("Missing required argument: case_id");
+    if (!memoryId) throw new Error("Missing required argument: memory_id");
+    if (!verdict) throw new Error("Missing required argument: verdict (RESOLVED | DEFERRED | ESCALATED_TO_USER)");
+    if (!doctorNotes) throw new Error("Missing required argument: doctor_notes (必须提供病历诊断小结)");
+
+    if (verdict === "RESOLVED" && !treatment) {
+      throw new Error("当 verdict 为 RESOLVED 时，必须明确指定 treatment (KEEP | UPDATE | EXPIRE | MERGE)");
+    }
+    if (verdict === "RESOLVED" && treatment === "UPDATE" && !updatedContent) {
+      throw new Error("当 treatment 为 UPDATE 时，必须提供 updated_content (修正后的精确记忆文本)");
+    }
+
+    const targetPoint = await getPointById(memoryId, env);
+    if (!targetPoint || !targetPoint.payload) {
+      throw new Error(`目标记忆点 '${memoryId}' 未找到。`);
+    }
+    const oldPayload = targetPoint.payload;
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+
+    let actionDetails = "";
+
+    // 1. Execute prescription on target memory in constancy_memories
+    if (verdict === "RESOLVED") {
+      if (treatment === "UPDATE") {
+        // Create Superseded Lineage:
+        // a. Old memory marks expired + superseded_by newId + appends annotation
+        const newMemoryId = crypto.randomUUID();
+        const annotation: MemoryAnnotation = {
+          id: crypto.randomUUID(),
+          timestamp: nowIso,
+          kind: "correction",
+          text: `【🩺 医生临床处方】${doctorNotes}（后继世代: ${newMemoryId}）`,
+          source: "model_inferred"
+        };
+        const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
+        currentAnnotations.push(annotation);
+
+        await setPointPayload(memoryId, {
+          status: "expired",
+          retired: true,
+          retired_at: nowIso,
+          retired_reason: `[医生更新] ${doctorNotes}`,
+          superseded_by: newMemoryId,
+          annotations: currentAnnotations,
+          t_last_update: nowMs
+        }, env);
+
+        // b. Insert new memory point with predecessor link
+        const newVector = await getEmbedding(updatedContent, env, "document");
+        const initialH = injectIntent(new Array(7).fill(0), 1.0);
+        const newPayload: MemoryPointPayload = {
+          user_id: oldPayload.user_id,
+          content: updatedContent,
+          timestamp: nowIso,
+          date: nowIso.slice(0, 10),
+          type: oldPayload.type || "insight",
+          entities: oldPayload.entities || [],
+          tags: oldPayload.tags || [],
+          source: "model_inferred",
+          ch_prior: oldPayload.ch_prior || 9.0,
+          h_spectrum: initialH,
+          t_last_update: nowMs,
+          t_last_strong: nowMs,
+          status: "active",
+          predecessor: memoryId
+        };
+        await upsertMemoryPoint(newMemoryId, newVector, newPayload, env);
+        actionDetails = `已将旧记忆标记退役（指向后继 ${newMemoryId}），并成功写入世代更迭后的健康记忆。`;
+
+      } else if (treatment === "EXPIRE") {
+        const annotation: MemoryAnnotation = {
+          id: crypto.randomUUID(),
+          timestamp: nowIso,
+          kind: "correction",
+          text: `【🩺 医生临床处方】标记失效：${doctorNotes}`,
+          source: "model_inferred"
+        };
+        const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
+        currentAnnotations.push(annotation);
+
+        await setPointPayload(memoryId, {
+          status: "expired",
+          retired: true,
+          retired_at: nowIso,
+          retired_reason: doctorNotes,
+          annotations: currentAnnotations,
+          t_last_update: nowMs
+        }, env);
+        actionDetails = `已对该病灶记忆标记失效 (status: expired)，退出活跃检索队列。`;
+
+      } else if (treatment === "KEEP") {
+        const annotation: MemoryAnnotation = {
+          id: crypto.randomUUID(),
+          timestamp: nowIso,
+          kind: "context",
+          text: `【🩺 医生巡诊确认】复核健康，维持原状：${doctorNotes}`,
+          source: "model_inferred"
+        };
+        const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
+        currentAnnotations.push(annotation);
+
+        await setPointPayload(memoryId, {
+          status: "active",
+          suspicion_count: 0,
+          annotations: currentAnnotations,
+          t_last_update: nowMs
+        }, env);
+        actionDetails = `复核确认记忆准确健康，清空存疑计数，维持原状。`;
+      }
+    } else if (verdict === "DEFERRED") {
+      const deferCount = (oldPayload.defer_count || 0) + 1;
+      const suspicionCount = (oldPayload.suspicion_count || 0) + 1;
+      await setPointPayload(memoryId, {
+        defer_count: deferCount,
+        suspicion_count: suspicionCount,
+        t_last_update: nowMs
+      }, env);
+      actionDetails = `证据不足，已登记留观跟踪 (累计留观 ${deferCount} 次)，避免草率动刀。`;
+    } else if (verdict === "ESCALATED_TO_USER") {
+      await setPointPayload(memoryId, {
+        pending_user_confirmation: true,
+        t_last_update: nowMs
+      }, env);
+      actionDetails = `案情重大且存疑，已将案卷转送至后花园控制台，等待用户主权裁决。`;
+    }
+
+    // 2. Update Qdrant concerns collection
+    const updatedCount = await updateCaseConcerns(userId, memoryId, caseId, verdict, treatment, doctorNotes, env);
+
+    return {
+      success: true,
+      case_id: caseId,
+      memory_id: memoryId,
+      verdict,
+      treatment: treatment || null,
+      concerns_closed: updatedCount,
+      action_details: actionDetails,
+      doctor_notes: doctorNotes,
+      message: `🩺 案卷 ${caseId} 临床处方已成功下达并留档执行。`
     };
   }
 

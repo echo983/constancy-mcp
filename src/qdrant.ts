@@ -2,7 +2,16 @@
  * Qdrant Vector Client for constancy_memories Collection
  */
 
-import { MemoryPointPayload, MemoryAnnotation } from "./actd";
+import {
+  MemoryPointPayload,
+  MemoryAnnotation,
+  CognitiveConcernPayload,
+  DoctorCase,
+  DoctorVerdict,
+  DoctorTreatment,
+  ConcernSeverity,
+  ConcernStatus
+} from "./actd";
 
 export interface QdrantEnv {
   QDRANT_URL: string;
@@ -10,6 +19,7 @@ export interface QdrantEnv {
 }
 
 const COLLECTION_NAME = "constancy_memories";
+export const CONCERNS_COLLECTION = "constancy_concerns";
 
 async function qdrantFetch(url: string, env: QdrantEnv, options: RequestInit = {}) {
   const headers = {
@@ -675,4 +685,310 @@ export async function appendMemoryAnnotation(
     t_last_update: Date.now()
   };
 }
+
+// ==================== Cognitive Hygiene & Doctor Queue Operations ====================
+
+export async function ensureConcernsCollection(env: QdrantEnv): Promise<void> {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}`;
+  const checkRes = await qdrantFetch(url, env, { method: "GET" });
+  if (!checkRes.ok) {
+    const createRes = await qdrantFetch(url, env, {
+      method: "PUT",
+      body: JSON.stringify({
+        vectors: {
+          size: 4,
+          distance: "Cosine"
+        }
+      })
+    });
+    if (!createRes.ok && createRes.status !== 409) {
+      const errText = await createRes.text();
+      console.warn(`Could not create ${CONCERNS_COLLECTION}: ${errText}`);
+    }
+  }
+}
+
+export async function submitConcernToQdrant(
+  concern: CognitiveConcernPayload,
+  env: QdrantEnv
+): Promise<{ id: string; duplicate_count: number; status: string; is_new: boolean }> {
+  await ensureConcernsCollection(env);
+
+  // Check if active concern already exists for this memory_id and user_id
+  const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}/points/scroll`;
+  const checkRes = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 10,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: concern.user_id } },
+          { key: "memory_id", match: { value: concern.memory_id } }
+        ]
+      },
+      with_payload: true,
+      with_vector: false
+    })
+  });
+
+  let existingPoint: any = null;
+  if (checkRes.ok) {
+    const data: any = await checkRes.json();
+    const activePoints = (data.result?.points || []).filter(
+      (p: any) => p.payload?.status === "pending" || p.payload?.status === "deferred"
+    );
+    if (activePoints.length > 0) {
+      existingPoint = activePoints[0];
+    }
+  }
+
+  if (existingPoint) {
+    // Deduplicate and escalate existing concern
+    const oldPayload = existingPoint.payload as CognitiveConcernPayload;
+    const newCount = (oldPayload.duplicate_count || 1) + 1;
+    const severityOrder: Record<string, number> = { low: 1, medium: 2, high: 3 };
+    const escalatedSeverity: ConcernSeverity =
+      (severityOrder[concern.severity] || 1) > (severityOrder[oldPayload.severity] || 1)
+        ? concern.severity
+        : oldPayload.severity;
+
+    const appendedEvidence = `${oldPayload.evidence || ""}\n---\n[追加证据 ${concern.created_at}] ${concern.evidence}`;
+    const updatedPayload: Partial<CognitiveConcernPayload> = {
+      duplicate_count: newCount,
+      severity: escalatedSeverity,
+      evidence: appendedEvidence,
+      status: "pending", // Re-activate to pending if it was deferred
+      updated_at: concern.created_at
+    };
+
+    const updateUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}/points/payload?wait=true`;
+    await qdrantFetch(updateUrl, env, {
+      method: "POST",
+      body: JSON.stringify({
+        points: [existingPoint.id],
+        payload: updatedPayload
+      })
+    });
+
+    return { id: String(existingPoint.id), duplicate_count: newCount, status: "pending", is_new: false };
+  }
+
+  // Insert new concern point with 4-dim dummy vector
+  const upsertUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}/points?wait=true`;
+  const insertRes = await qdrantFetch(upsertUrl, env, {
+    method: "PUT",
+    body: JSON.stringify({
+      points: [
+        {
+          id: concern.id,
+          vector: [0, 0, 0, 0],
+          payload: concern
+        }
+      ]
+    })
+  });
+
+  if (!insertRes.ok) {
+    const errText = await insertRes.text();
+    throw new Error(`Qdrant submitConcern error (${insertRes.status}): ${errText}`);
+  }
+
+  return { id: concern.id, duplicate_count: 1, status: concern.status, is_new: true };
+}
+
+export async function getDoctorTriageCases(
+  userId: string,
+  limit: number = 5,
+  env: QdrantEnv
+): Promise<{ has_cases: boolean; case_count: number; cases: DoctorCase[] }> {
+  await ensureConcernsCollection(env);
+
+  const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}/points/scroll`;
+  const res = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 100,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } }
+        ]
+      },
+      with_payload: true,
+      with_vector: false
+    })
+  });
+
+  if (!res.ok) {
+    return { has_cases: false, case_count: 0, cases: [] };
+  }
+
+  const data: any = await res.json();
+  const allPoints: any[] = data.result?.points || [];
+  const now = Date.now();
+  const currentHourUtc = new Date(now).getUTCHours();
+
+  // Triage filter calculation
+  const triageReadyPoints = allPoints.filter(pt => {
+    const p = pt.payload as CognitiveConcernPayload;
+    if (!p || (p.status !== "pending" && p.status !== "deferred")) return false;
+
+    const createdAtMs = new Date(p.created_at || now).getTime();
+    const updatedAtMs = new Date(p.updated_at || p.created_at || now).getTime();
+    const ageHours = (now - createdAtMs) / (1000 * 60 * 60);
+
+    // 1. High severity / user_confirmed / 3+ duplicates -> immediate (every hour)
+    if (p.severity === "high" || p.interaction_mode === "user_confirmed" || (p.duplicate_count || 1) >= 3) {
+      return true;
+    }
+
+    // 2. Medium severity: age >= 6h, or duplicate_count >= 2, or clock modulo 6h (00, 06, 12, 18)
+    if (p.severity === "medium") {
+      if (ageHours >= 6 || (p.duplicate_count || 1) >= 2 || currentHourUtc % 6 === 0) {
+        return true;
+      }
+    }
+
+    // 3. Low severity: age >= 24h, or daily check at 04:00 UTC
+    if (p.severity === "low") {
+      if (ageHours >= 24 || currentHourUtc === 4) {
+        return true;
+      }
+    }
+
+    // 4. Deferred review: if deferred >= 48h
+    if (p.status === "deferred") {
+      const deferAgeHours = (now - updatedAtMs) / (1000 * 60 * 60);
+      if (deferAgeHours >= 48) return true;
+    }
+
+    return false;
+  });
+
+  if (triageReadyPoints.length === 0) {
+    return { has_cases: false, case_count: 0, cases: [] };
+  }
+
+  // Group concerns by target memory_id into cases
+  const caseMap = new Map<string, any[]>();
+  for (const pt of triageReadyPoints) {
+    const memId = pt.payload?.memory_id;
+    if (!memId) continue;
+    if (!caseMap.has(memId)) caseMap.set(memId, []);
+    caseMap.get(memId)!.push(pt);
+  }
+
+  const doctorCases: DoctorCase[] = [];
+  for (const [memId, pts] of caseMap.entries()) {
+    if (doctorCases.length >= limit) break;
+
+    // Fetch target memory details
+    const targetPoint = await getPointById(memId, env);
+    const targetPayload = targetPoint?.payload;
+
+    const highestSeverity: ConcernSeverity = pts.some((x: any) => x.payload?.severity === "high")
+      ? "high"
+      : pts.some((x: any) => x.payload?.severity === "medium")
+      ? "medium"
+      : "low";
+
+    const totalReports = pts.reduce((sum: number, x: any) => sum + (x.payload?.duplicate_count || 1), 0);
+
+    doctorCases.push({
+      case_id: `CASE-${memId.slice(0, 8).toUpperCase()}`,
+      memory_id: memId,
+      target_memory: {
+        id: memId,
+        content: targetPayload?.content || "（目标记忆已删除或不存在）",
+        type: targetPayload?.type,
+        c_h: targetPayload?.ch_prior,
+        created_at: targetPayload?.timestamp || targetPayload?.date,
+        annotations: targetPayload?.annotations || [],
+        status: targetPayload?.status || "active"
+      },
+      concerns: pts.map((x: any) => ({
+        id: String(x.id),
+        reason: x.payload?.reason || "",
+        evidence: x.payload?.evidence || "",
+        severity: x.payload?.severity || "low",
+        interaction_mode: x.payload?.interaction_mode || "silent",
+        created_at: x.payload?.created_at || "",
+        duplicate_count: x.payload?.duplicate_count || 1
+      })),
+      total_reports: totalReports,
+      highest_severity: highestSeverity,
+      triage_reason: highestSeverity === "high" ? "高危即时到期 (high priority)" : `${highestSeverity} 候诊窗口达标`,
+      diagnostic_hint: `请核查该条记忆事实与最新用户原话证据，决定维持(KEEP)、修正(UPDATE)、废弃(EXPIRE)、归并(MERGE)、留观(DEFERRED)或请用户会诊(ESCALATED_TO_USER)`
+    });
+  }
+
+  return {
+    has_cases: doctorCases.length > 0,
+    case_count: doctorCases.length,
+    cases: doctorCases
+  };
+}
+
+export async function updateCaseConcerns(
+  userId: string,
+  memoryId: string,
+  caseId: string,
+  verdict: DoctorVerdict,
+  treatment: DoctorTreatment | undefined,
+  doctorNotes: string,
+  env: QdrantEnv
+): Promise<number> {
+  await ensureConcernsCollection(env);
+  const nowIso = new Date().toISOString();
+
+  // Scroll active concerns matching memory_id & user_id
+  const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}/points/scroll`;
+  const res = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 50,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } },
+          { key: "memory_id", match: { value: memoryId } }
+        ]
+      },
+      with_payload: true,
+      with_vector: false
+    })
+  });
+
+  if (!res.ok) return 0;
+
+  const data: any = await res.json();
+  const concernPoints: any[] = data.result?.points || [];
+  const pointIds = concernPoints.map((p: any) => p.id);
+
+  if (pointIds.length === 0) return 0;
+
+  let newStatus: ConcernStatus = "resolved";
+  if (verdict === "DEFERRED") newStatus = "deferred";
+  if (verdict === "ESCALATED_TO_USER") newStatus = "escalated_to_user";
+
+  const updatePayload: Partial<CognitiveConcernPayload> = {
+    status: newStatus,
+    doctor_case_id: caseId,
+    doctor_verdict: verdict,
+    doctor_treatment: treatment,
+    doctor_notes: doctorNotes,
+    updated_at: nowIso,
+    resolved_at: verdict === "RESOLVED" ? nowIso : undefined
+  };
+
+  const payloadUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}/points/payload?wait=true`;
+  await qdrantFetch(payloadUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      points: pointIds,
+      payload: updatePayload
+    })
+  });
+
+  return pointIds.length;
+}
+
 

@@ -45,10 +45,17 @@ export interface MemoryPointPayload {
   h_spectrum: number[];   // 7-dim float vector for s=0..6
   t_last_update: number;  // Epoch ms
   t_last_strong: number;  // Epoch ms
-  // Explicit Retirement Lifecycle Fields
+  // Explicit Retirement & Cognitive Hygiene Lifecycle Fields
   retired?: boolean;
   retired_at?: string;
   retired_reason?: string;
+  status?: "active" | "expired" | "superseded";
+  superseded_by?: string;
+  predecessor?: string;
+  defer_count?: number;
+  suspicion_count?: number;
+  pending_user_confirmation?: boolean;
+  expired_reason?: string;
 
   // Optional Entity Fields
   entity_name?: string;
@@ -83,6 +90,60 @@ export interface NoteRevision {
   reason?: string;
 }
 
+// ==================== Cognitive Hygiene & Doctor Architecture ====================
+export type ConcernSeverity = "high" | "medium" | "low";
+export type InteractionMode = "silent" | "informed_user" | "user_confirmed";
+export type ConcernStatus = "pending" | "investigating" | "resolved" | "deferred" | "escalated_to_user";
+export type DoctorVerdict = "RESOLVED" | "DEFERRED" | "ESCALATED_TO_USER";
+export type DoctorTreatment = "KEEP" | "UPDATE" | "EXPIRE" | "MERGE";
+
+export interface CognitiveConcernPayload {
+  id: string;                      // 顾虑唯一标识 UUID
+  user_id: string;                 // 用户标识
+  memory_id: string;               // 关联目标记忆 UUID
+  reason: string;                  // 存疑/冲突原因简述
+  evidence: string;                // 现实证据链（含用户原话引用）
+  severity: ConcernSeverity;       // 严重级别
+  interaction_mode: InteractionMode;// 交互姿态
+  status: ConcernStatus;           // 候诊状态
+  created_at: string;              // ISO 8601 UTC
+  updated_at: string;              // ISO 8601 UTC
+  duplicate_count: number;         // 相同记忆被举报次数 (默认 1)
+  defer_count: number;             // 被医生留观的累计次数
+  doctor_case_id?: string;         // 绑定的病案号
+  doctor_verdict?: DoctorVerdict;  // 医生最终裁决
+  doctor_treatment?: DoctorTreatment; // 医生处置动作
+  doctor_notes?: string;           // 医生病历诊断小结
+  resolved_at?: string;            // 解决时间
+}
+
+export interface DoctorCase {
+  case_id: string;
+  memory_id: string;
+  target_memory: {
+    id: string;
+    content: string;
+    type?: string;
+    c_h?: number;
+    created_at?: string;
+    annotations?: MemoryAnnotation[];
+    status?: string;
+  };
+  concerns: Array<{
+    id: string;
+    reason: string;
+    evidence: string;
+    severity: ConcernSeverity;
+    interaction_mode: InteractionMode;
+    created_at: string;
+    duplicate_count: number;
+  }>;
+  total_reports: number;
+  highest_severity: ConcernSeverity;
+  triage_reason: string;
+  diagnostic_hint: string;
+}
+
 export type HealthStatus = "FRESH" | "DRIFTING" | "DORMANT";
 
 export interface EvaluatedMemory {
@@ -105,6 +166,9 @@ export interface EvaluatedMemory {
   retired?: boolean;
   retired_at?: string;
   retired_reason?: string;
+  superseded_by?: string;
+  predecessor?: string;
+  memory_status?: "active" | "expired" | "superseded";
 
   // Provenance & Annotations
   source?: MemorySourceType;

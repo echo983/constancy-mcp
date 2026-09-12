@@ -108,6 +108,12 @@ graph TD
     * **图片入库与多模态索引（阶段二）**：在直传完成后调用，由大模型深度观察图像细节生成高信噪比描述，注入 EXIF 拍摄时间与 GPS 经纬度，自动调用 Voyage-Multimodal-3.5 计算视觉向量并建立 Qdrant 索引与关联便签。
 15. `annotate_memory(id, kind, text, source?, ref_id?)`  
     * **非破坏性勘误与附注**：对既有记忆进行事实更正（`correction`）、存疑标记（`dispute`）或补充上下文（`context`）。原文与时空向量一字不动，保证因果可证伪性；后续检索自动挂载更正警示牌并置展示，彻底杜绝历史被涂抹带来的认知失真。
+16. `submit_concern(memory_id, reason, evidence, severity?, interaction_mode?)`  
+    * **门诊异常主诉（日常 LLM 义务工具）**：当对话中发现旧记忆与现实明显冲突、过期或失真时，日常 LLM 有义务调用此工具提交病症顾虑并附带用户原话证据。支持静默 (`silent`)、顺带告知 (`informed_user`)、确认后再报 (`user_confirmed`) 三档姿态。
+17. `get_maintenance_cases(limit?)`  
+    * **🩺 巡诊分诊案卷获取（医生专用）**：供专职巡诊医生（Scheduled Task Claude）每小时整点唤醒调用。私域分诊台自动完成 1h/6h/24h 窗口计算与案卷聚合，无任务时秒级退出，零无效 Token 消耗。**严禁日常对话模型调用**。
+18. `resolve_maintenance_case(case_id, memory_id, verdict, treatment?, updated_content?, doctor_notes?)`  
+    * **🩺 临床处方与世代更迭（医生专用）**：医生完成研判后下达处方，支持维持(`KEEP`)、世代更新(`UPDATE`，旧记忆退休并指向新纪元，新记忆入库并继承谱系)、失效归档(`EXPIRE`)、留观跟踪(`DEFERRED`)或转送用户会诊(`ESCALATED_TO_USER`)。**严禁日常对话模型调用**。
 ---
 
 ## 🏗️ 飞轮运作流：白天打点，夜间蒸馏，长波自愈
