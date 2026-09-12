@@ -627,6 +627,11 @@ export const MCP_TOOLS = [
         doctor_notes: {
           type: "string",
           description: "医生病历小结：诊断依据、事实推演与处方理由（将存入私域不可变审计日志）"
+        },
+        merge_with_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "可选。当处置方案为 MERGE 时，需一并归并退役的同构/重复旧记忆点 ID 清单"
         }
       },
       required: ["case_id", "memory_id", "verdict", "doctor_notes"]
@@ -2179,6 +2184,64 @@ export async function executeToolCall(
           t_last_update: nowMs
         }, env);
         actionDetails = `复核确认记忆准确健康，清空存疑计数，维持原状。`;
+
+      } else if (treatment === "MERGE") {
+        const mergeWithIds: string[] = Array.isArray(args.merge_with_ids) ? args.merge_with_ids : [];
+        let retiredCount = 0;
+        for (const mId of mergeWithIds) {
+          if (!mId || mId === memoryId) continue;
+          const mPoint = await getPointById(mId, env);
+          if (mPoint && mPoint.payload) {
+            const mAnnotations = Array.isArray(mPoint.payload.annotations) ? [...mPoint.payload.annotations] : [];
+            mAnnotations.push({
+              id: crypto.randomUUID(),
+              timestamp: nowIso,
+              kind: "correction",
+              text: `【🩺 医生临床处方】归并退役：已合并入主记忆 [${memoryId}]。理由: ${doctorNotes}`,
+              source: "model_inferred"
+            });
+            await setPointPayload(mId, {
+              status: "expired",
+              retired: true,
+              retired_at: nowIso,
+              retired_reason: `归并入主记忆 [${memoryId}]`,
+              superseded_by: memoryId,
+              annotations: mAnnotations,
+              t_last_update: nowMs
+            }, env);
+            retiredCount++;
+          }
+        }
+
+        let newContent = oldPayload.content;
+        if (updatedContent) {
+          newContent = updatedContent;
+          const newVector = await getEmbedding(updatedContent, env, "document");
+          await upsertMemoryPoint(memoryId, newVector, {
+            ...oldPayload,
+            content: newContent,
+            status: "active",
+            suspicion_count: 0,
+            t_last_update: nowMs
+          }, env);
+        } else {
+          await setPointPayload(memoryId, {
+            status: "active",
+            suspicion_count: 0,
+            t_last_update: nowMs
+          }, env);
+        }
+
+        const annotation: MemoryAnnotation = {
+          id: crypto.randomUUID(),
+          timestamp: nowIso,
+          kind: "context",
+          text: `【🩺 医生临床处方】归并精简：已合并吸收 ${retiredCount} 条同构碎片。理由: ${doctorNotes}`,
+          source: "model_inferred"
+        };
+        await appendMemoryAnnotation(memoryId, annotation, env);
+
+        actionDetails = `已成功将 ${retiredCount} 条同构碎片归并至主记忆 [${memoryId}]，消除认知冗余与重复。`;
       }
     } else if (verdict === "DEFERRED") {
       const deferCount = (oldPayload.defer_count || 0) + 1;

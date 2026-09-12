@@ -355,7 +355,63 @@ async function run() {
     }
     console.log("✅ ESCALATED_TO_USER successfully verified!");
 
-    console.log("\n🎉 ALL 12 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
+    // -------------------------------------------------------------
+    // Test 13: MERGE treatment test
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 13] Testing MERGE treatment ---");
+    const memMergeA = await executeToolCall("log_memory", {
+      content: "用户最常用的编程语言是 TypeScript",
+      c_h: 9.5,
+      type: "preference",
+      source: "user_stated"
+    }, testUserId, env);
+    pointsToDelete.push(memMergeA.id);
+
+    const memMergeB = await executeToolCall("log_memory", {
+      content: "用户日常开发主要使用 TypeScript 进行全栈开发",
+      c_h: 9.2,
+      type: "preference",
+      source: "user_stated"
+    }, testUserId, env);
+    pointsToDelete.push(memMergeB.id);
+
+    await executeToolCall("submit_concern", {
+      memory_id: memMergeA.id,
+      reason: "存在重复同构的偏好记忆",
+      evidence: "记忆库中存在多条关于 TypeScript 偏好的冗余碎片",
+      severity: "high"
+    }, testUserId, env);
+
+    const casesMerge = await executeToolCall("get_maintenance_cases", { limit: 5 }, testUserId, env);
+    const caseMerge = casesMerge.cases.find((c: any) => c.memory_id === memMergeA.id);
+    if (!caseMerge) throw new Error("Expected case for MERGE test");
+
+    const mergeRes = await executeToolCall("resolve_maintenance_case", {
+      case_id: caseMerge.case_id,
+      memory_id: memMergeA.id,
+      verdict: "RESOLVED",
+      treatment: "MERGE",
+      merge_with_ids: [memMergeB.id],
+      updated_content: "用户最常用的主力编程语言是 TypeScript，广泛用于全栈与边缘计算开发",
+      doctor_notes: "将两条同构冗余的编程偏好碎片合二为一，消除认知冗余"
+    }, testUserId, env);
+    if (!mergeRes.success) throw new Error("Expected MERGE to succeed");
+
+    const memAfterMergeB = await getPointById(memMergeB.id, env);
+    if (memAfterMergeB.payload?.status !== "expired" || !memAfterMergeB.payload?.retired) {
+      throw new Error("Expected merged secondary memory to be retired");
+    }
+    if (memAfterMergeB.payload?.superseded_by !== memMergeA.id) {
+      throw new Error(`Expected merged secondary superseded_by to point to ${memMergeA.id}`);
+    }
+
+    const memAfterMergeA = await getPointById(memMergeA.id, env);
+    if (memAfterMergeA.payload?.status !== "active") {
+      throw new Error("Expected primary merged memory to be active");
+    }
+    console.log("✅ MERGE treatment successfully verified!");
+
+    console.log("\n🎉 ALL 13 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
 
   } finally {
     // -------------------------------------------------------------
