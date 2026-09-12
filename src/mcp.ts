@@ -2323,7 +2323,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.4.0",
+          version: "1.5.0",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }
