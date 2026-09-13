@@ -1,13 +1,14 @@
 {
   "name": "constancy-mcp",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server on Cloudflare Workers",
   "main": "src/index.ts",
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit",
-    "test:doctor": "tsx scripts/test_cognitive_hygiene.ts"
+    "test:doctor": "tsx scripts/test_cognitive_hygiene.ts",
+    "test:vision": "tsx scripts/test_fetch_image_vision.ts"
   },
   "keywords": [
     "mcp",

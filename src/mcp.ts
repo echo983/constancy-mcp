@@ -48,6 +48,29 @@ import {
 } from "./qdrant";
 import { computeBase64Sha256, generateBlobSig } from "./blob";
 
+declare const Buffer: any;
+
+export function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(buffer).toString("base64");
+  }
+  const bytes = new Uint8Array(buffer);
+  const CHUNK_SIZE = 0x8000;
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + CHUNK_SIZE);
+    binary += String.fromCharCode.apply(null, chunk as any);
+  }
+  return btoa(binary);
+}
+
+export function getBase64ByteLength(base64: string): number {
+  if (typeof Buffer !== "undefined") {
+    return Buffer.from(base64, "base64").byteLength;
+  }
+  return atob(base64).length;
+}
+
 export const CF_IMAGE_DELIVERY_HASH = "uTkE-E-smfahZbJoOmXVCw";
 
 export async function getSignedImageVariants(
@@ -424,6 +447,29 @@ export const MCP_TOOLS = [
         id: {
           type: "string",
           description: "便签 ID (Note UUID) 或 Cloudflare 图片 ID (image_id)"
+        }
+      },
+      required: ["id"]
+    }
+  },
+  {
+    name: "fetch_image_vision",
+    description: "【视觉直读】将图库中的指定图片以图像形式直接载入模型视觉通道，无需沙箱下载。当需要亲眼核对画面细节（辨认招牌小字、核实物体位置、比对与文字描述是否一致、回答'图里到底有没有某物'）时调用。若仅需向用户展示图片或提供下载链接，请改用 get_blob_url；若需批量处理、裁剪或本地 OCR，请走沙箱 curl 路径。每次仅能载入一张图，请按需选择分辨率变体以控制 Token 开销：ai512 极省（约200-350 tokens，用于粗粒度识别）、ai768 推荐默认（约500-800 tokens，通用场景理解）、ai1024 高精（约1100-1600 tokens，仅用于密集文本/复杂图表）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Cloudflare 图片 ID (image_id)、图库点 UUID，或与图片关联的 Note 便签 UUID（多态解析）。必填。"
+        },
+        variant: {
+          type: "string",
+          enum: ["ai512", "ai768", "ai1024"],
+          description: "分辨率变体，默认 ai768。注意严禁开放 public 原图变体，避免数百万像素灌爆上下文。"
+        },
+        include_metadata: {
+          type: "boolean",
+          description: "是否在图像块之前附带一小段简短文本块（说明该图标题、拍摄时间、GPS坐标）。默认 true。"
         }
       },
       required: ["id"]
@@ -1703,6 +1749,241 @@ export async function executeToolCall(
     throw new Error(`Resource '${targetId}' not found or unauthorized.`);
   }
 
+  // 11.1 Tool: fetch_image_vision
+  if (name === "fetch_image_vision") {
+    const rawId = (args.id || "").trim();
+    if (!rawId) throw new Error("Missing required parameter: id");
+
+    // Guardrail: Whitelist regex validation for id format
+    if (!/^[a-zA-Z0-9_-]{4,128}$/.test(rawId)) {
+      throw new Error(`Invalid id format: '${rawId}'. Expected valid UUID or image identifier.`);
+    }
+
+    const variant = (args.variant || "ai768").trim();
+    if (!["ai512", "ai768", "ai1024"].includes(variant)) {
+      throw new Error(`Invalid variant: '${variant}'. Only 'ai512', 'ai768', and 'ai1024' are permitted to protect context window.`);
+    }
+    const includeMetadata = args.include_metadata !== false;
+
+    let targetImageId: string | null = null;
+    let title: string = "视觉图像资产";
+    let takenAt: string | undefined = undefined;
+    let locationStr: string | undefined = undefined;
+    let nativeBase64: string | null = null;
+    let nativeMimeType: string = "image/jpeg";
+    let isNoteWithoutImage = false;
+
+    // 1. Try finding in constancy_memories (Note UUID or memory point)
+    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(rawId);
+    const point = isUuid ? await getPointById(rawId, env) : null;
+    if (point && point.payload && point.payload.user_id === userId) {
+      const p = point.payload;
+      if (p.title) title = p.title;
+      if (p.captured_at || p.created_at || p.timestamp) {
+        takenAt = p.captured_at || p.created_at || p.timestamp;
+      }
+      const loc = p.location as any;
+      if (loc) {
+        const lat = loc.lat ?? loc.latitude;
+        const lon = loc.lon ?? loc.longitude;
+        if (typeof lat === "number" && typeof lon === "number") {
+          locationStr = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+        }
+      }
+
+      // Check if note contains native base64 image
+      if (p.base64) {
+        const declaredMime = (p.mime_type || "").toLowerCase().trim();
+        if (declaredMime.startsWith("image/")) {
+          nativeBase64 = p.base64;
+          nativeMimeType = declaredMime.split(";")[0].trim();
+        }
+      }
+
+      if (!nativeBase64) {
+        const cfImageId = extractAssociatedImageId(p);
+        if (cfImageId) {
+          targetImageId = cfImageId;
+        } else {
+          isNoteWithoutImage = true;
+        }
+      }
+    }
+
+    if (isNoteWithoutImage && !targetImageId && !nativeBase64) {
+      throw new Error(`Note '${rawId}' has no image attachment or associated Cloudflare Image ID.`);
+    }
+
+    // 2. Check images collection (by UUID or image_id or targetImageId)
+    const lookupId = targetImageId || rawId;
+    if (!nativeBase64) {
+      const imgPoint = await getImagePoint(lookupId, userId, env);
+      if (imgPoint && imgPoint.payload) {
+        const p = imgPoint.payload;
+        targetImageId = p.image_id || imgPoint.id;
+        if (p.title || p.filename) {
+          title = p.title || p.filename;
+        }
+        if (p.captured_at || p.taken_at || p.created_at) {
+          takenAt = p.captured_at || p.taken_at || p.created_at;
+        }
+        const loc = p.location as any;
+        if (loc) {
+          const lat = loc.lat ?? loc.latitude;
+          const lon = loc.lon ?? loc.longitude;
+          if (typeof lat === "number" && typeof lon === "number") {
+            locationStr = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+          }
+        }
+      }
+    }
+
+    // 3. Fallback: if rawId itself is a direct Cloudflare image_id
+    if (!nativeBase64 && !targetImageId) {
+      targetImageId = rawId;
+    }
+
+    // Branch A: Note has native Base64 image
+    if (nativeBase64) {
+      const allowedMimes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+      if (!allowedMimes.includes(nativeMimeType)) {
+        throw new Error(`Unsupported image MIME type '${nativeMimeType}'. Anthropic Claude vision requires JPEG, PNG, WEBP, or GIF.`);
+      }
+
+      const byteLength = getBase64ByteLength(nativeBase64);
+      if (byteLength > 3 * 1024 * 1024) {
+        throw new Error(`Image size (${Math.round(byteLength / 1024)}KB) exceeds 3MB limit.`);
+      }
+
+      const content: any[] = [];
+      if (includeMetadata) {
+        const metaLines: string[] = [
+          `📷 **视觉图像元数据** [${rawId}]`,
+          `- 标题: ${title}`
+        ];
+        const details: string[] = [];
+        if (takenAt) details.push(`记录时间: ${takenAt}`);
+        if (locationStr) details.push(`位置: ${locationStr}`);
+        details.push(`规格: 便签原图 (${Math.round(byteLength / 1024)} KB, ${nativeMimeType})`);
+        metaLines.push(`- ${details.join(" | ")}`);
+        content.push({ type: "text", text: metaLines.join("\n") });
+      }
+
+      content.push({
+        type: "image",
+        data: nativeBase64,
+        mimeType: nativeMimeType
+      });
+
+      return { content };
+    }
+
+    // Branch B: Fetch from Cloudflare Images via signed URL
+    if (!targetImageId) {
+      throw new Error(`Image '${rawId}' not found or unauthorized.`);
+    }
+
+    const variants = await getSignedImageVariants(targetImageId, env, 7200);
+    const fetchUrl = variants[variant as "ai512" | "ai768" | "ai1024"];
+    if (!fetchUrl) {
+      throw new Error(`Variant '${variant}' is not available.`);
+    }
+
+    // Guardrail: Fetch with strict Accept header (anti-AVIF), 8s timeout, 1 retry on network/5xx
+    let response: Response | null = null;
+    let lastError: any = null;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        response = await fetch(fetchUrl, {
+          method: "GET",
+          headers: {
+            "Accept": "image/jpeg,image/png,image/webp",
+            "User-Agent": "Constancy-MCP/1.6.0"
+          },
+          signal: AbortSignal.timeout(8000)
+        });
+
+        if (response.ok) {
+          break;
+        }
+
+        // 4xx client errors (e.g. 404 Not Found) - do not retry
+        if (response.status >= 400 && response.status < 500) {
+          break;
+        }
+      } catch (err: any) {
+        lastError = err;
+        if (attempt === 0) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+      }
+    }
+
+    if (!response) {
+      throw new Error(`Failed to fetch image '${rawId}': ${lastError?.message || "Network timeout or connection error"}`);
+    }
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error(`Image '${rawId}' was not found on image storage (HTTP 404).`);
+      }
+      throw new Error(`Image delivery failed for '${rawId}': HTTP ${response.status} ${response.statusText}`);
+    }
+
+    // MIME type validation & AVIF defense
+    const rawContentType = response.headers.get("content-type") || "";
+    const mimeType = rawContentType.split(";")[0].trim().toLowerCase();
+
+    if (mimeType === "image/avif") {
+      throw new Error("Received unsupported AVIF format from image provider. Anthropic Claude vision requires JPEG, PNG, WEBP, or GIF.");
+    }
+
+    const allowedMimes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+    if (!allowedMimes.includes(mimeType)) {
+      throw new Error(`Unsupported image MIME type: '${mimeType}'. Supported formats are JPEG, PNG, WEBP, and GIF.`);
+    }
+
+    // Content length pre-check
+    const contentLength = response.headers.get("content-length");
+    if (contentLength && parseInt(contentLength, 10) > 3 * 1024 * 1024) {
+      throw new Error(`Image size (${Math.round(parseInt(contentLength, 10) / 1024)}KB) exceeds 3MB limit. Please choose a smaller variant (e.g. 'ai512').`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > 3 * 1024 * 1024) {
+      throw new Error(`Image size (${Math.round(arrayBuffer.byteLength / 1024)}KB) exceeds 3MB limit. Please choose a smaller variant (e.g. 'ai512').`);
+    }
+    if (arrayBuffer.byteLength === 0) {
+      throw new Error(`Fetched image is empty (0 bytes).`);
+    }
+
+    // Base64 encoding via helper
+    const base64Data = arrayBufferToBase64(arrayBuffer);
+
+    const content: any[] = [];
+    if (includeMetadata) {
+      const metaLines: string[] = [
+        `📷 **视觉图像元数据** [${rawId}]`,
+        `- 标题: ${title}`
+      ];
+      const details: string[] = [];
+      if (takenAt) details.push(`拍摄时间: ${takenAt}`);
+      if (locationStr) details.push(`位置: ${locationStr}`);
+      details.push(`变体规格: ${variant} (${Math.round(arrayBuffer.byteLength / 1024)} KB, ${mimeType})`);
+      metaLines.push(`- ${details.join(" | ")}`);
+      content.push({ type: "text", text: metaLines.join("\n") });
+    }
+
+    content.push({
+      type: "image",
+      data: base64Data,
+      mimeType: mimeType
+    });
+
+    return { content };
+  }
+
   // 12. Tool: create_upload_url
   if (name === "create_upload_url") {
     const title = (args.title || "").trim();
@@ -2323,7 +2604,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.5.0",
+          version: "1.6.0",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }
@@ -2356,6 +2637,19 @@ export async function handleMcpJsonRpc(
     const { name, arguments: toolArgs } = params || {};
     try {
       const output = await executeToolCall(name, toolArgs, userId, env, ctx);
+
+      // Multi-part content transparent pass-through (e.g. fetch_image_vision)
+      if (output && Array.isArray(output.content)) {
+        return {
+          jsonrpc: "2.0",
+          id,
+          result: {
+            content: output.content,
+            ...(output.isError ? { isError: true } : {})
+          }
+        };
+      }
+
       return {
         jsonrpc: "2.0",
         id,
@@ -2379,7 +2673,8 @@ export async function handleMcpJsonRpc(
               type: "text",
               text: `Error executing ${name}: ${err.message}`
             }
-          ]
+          ],
+          isError: true
         }
       };
     }
