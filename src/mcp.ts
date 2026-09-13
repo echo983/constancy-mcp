@@ -852,7 +852,7 @@ export async function executeToolCall(
     };
 
     const searchMemoriesPromise = isImageOnly
-      ? Promise.resolve([])
+      ? searchMemoryPoints(queryVector, userId, Math.min(limit, 8), env, { ...structuredFilter, type: "note" })
       : searchMemoryPoints(queryVector, userId, limit * 3, env, structuredFilter);
 
     const searchImagesPromise = includeImages
@@ -980,6 +980,25 @@ export async function executeToolCall(
       });
     }
 
+    // Dual-channel visual asset recall: if notes with associated images were retrieved, pull their image points into imageCandidates
+    const existingCandidateImgIds = new Set((imageCandidates || []).map((c: any) => c.payload?.image_id || c.id));
+    for (const item of candidates) {
+      const p = item.payload;
+      if (!p) continue;
+      const assocImgId = p.image_id || extractAssociatedImageId(p);
+      if (assocImgId && !existingCandidateImgIds.has(assocImgId)) {
+        existingCandidateImgIds.add(assocImgId);
+        const linkedImgPoints = await findImagePointsByImageId(assocImgId, userId, env);
+        if (linkedImgPoints.length > 0) {
+          imageCandidates.push({
+            id: linkedImgPoints[0].id,
+            payload: linkedImgPoints[0].payload,
+            score: Number((item.score || 0).toFixed(4))
+          });
+        }
+      }
+    }
+
     // Format visual image results with ready-to-use signed CDN URLs and curl commands
     // 🌟 FIX-3 (方案 B): 实时联查关联便签，以主库 (constancy_memories) 活跃便签的描述与治理注记为唯一权威
     const imageResultsRaw = await Promise.all((imageCandidates || []).map(async item => {
@@ -993,7 +1012,7 @@ export async function executeToolCall(
       // Authoritative description: prefer active note content (strip trailing CF image ID tag)
       let displayDescription = p.description || "";
       if (noteP?.content) {
-        displayDescription = noteP.content.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]\s*$/i, "").trim();
+        displayDescription = noteP.content.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]/gi, "").trim();
       }
 
       const annotations = noteP?.annotations && noteP.annotations.length > 0 ? noteP.annotations : undefined;
@@ -1062,14 +1081,14 @@ export async function executeToolCall(
     });
     const memoryResults = deduplicatedMemories.slice(0, limit);
 
-    const totalFound = memoryResults.length + imageResults.length;
+    const totalFound = (isImageOnly ? 0 : memoryResults.length) + imageResults.length;
     const returnObj: any = {
       query: query || undefined,
       filter: hasStructuredFilter ? structuredFilter : undefined,
       found_count: totalFound
     };
 
-    if (memoryResults.length > 0 || !isImageOnly) {
+    if (!isImageOnly) {
       returnObj.memories = memoryResults;
     }
     if (imageResults.length > 0 || isImageOnly) {
@@ -1654,7 +1673,13 @@ export async function executeToolCall(
     if (typeof args.content === "string") {
       const inputContent = args.content.trim();
       if (args.mode === "append") {
-        newContent = p.content ? `${p.content}\n${inputContent}` : inputContent;
+        const assocImgId = p.image_id || extractAssociatedImageId(p);
+        if (assocImgId && p.content) {
+          const baseDesc = p.content.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]/gi, "").trim();
+          newContent = `${baseDesc}\n${inputContent}\n\n[Cloudflare Images ID: ${assocImgId}]`;
+        } else {
+          newContent = p.content ? `${p.content}\n${inputContent}` : inputContent;
+        }
       } else {
         newContent = inputContent;
       }
@@ -1738,32 +1763,55 @@ export async function executeToolCall(
       await setPointPayload(pointId, p, env);
     }
 
-    // Bidirectional sync: if this note is associated with a Cloudflare Image, sync the images collection point
+    // Bidirectional sync: if this note is associated with a Cloudflare Image, sync the images collection point and recompute vector!
     const assocImgId = p.image_id || extractAssociatedImageId(p);
-    if (assocImgId && (contentChanged || titleChanged)) {
+    const tagsChanged = args.tags !== undefined;
+    if (assocImgId && (contentChanged || titleChanged || tagsChanged)) {
       try {
         const imgPoints = await findImagePointsByImageId(assocImgId, userId, env);
         if (imgPoints.length > 0) {
-          const cleanDesc = newContent.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]\s*$/i, "").trim();
+          const cleanDesc = newContent.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]/gi, "").trim();
           const imgP = imgPoints[0].payload || {};
-          const qdrantUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points/payload?wait=true`;
-          await fetch(qdrantUrl, {
-            method: "POST",
+          const imgTitle = newTitle || imgP.title || "视觉图像资产";
+          const imgTags = newTags.filter((t: string) => t !== "gallery" && t !== "note");
+
+          // 🌟 Recompute Voyage Multimodal embedding for images collection!
+          const imgTextToEmbed = imgTitle ? `${imgTitle}\n${cleanDesc}\n${imgTags.join(" ")}` : `${cleanDesc}\n${imgTags.join(" ")}`;
+          const imgVector = await getEmbedding(imgTextToEmbed, env, "document");
+
+          const qdrantUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points?wait=true`;
+          const updateRes = await fetch(qdrantUrl, {
+            method: "PUT",
             headers: {
-              "api-key": env.QDRANT_API_KEY?.trim(),
+              "api-key": env.QDRANT_API_KEY?.trim() || "",
               "Content-Type": "application/json",
               "User-Agent": "curl/8.14.1 (constancy-mcp worker)"
             },
             body: JSON.stringify({
-              points: [imgPoints[0].id],
-              payload: {
-                title: newTitle || imgP.title,
-                description: cleanDesc,
-                tags: newTags.filter((t: string) => t !== "gallery" && t !== "note"),
-                updated_at: now.toISOString()
-              }
+              points: [
+                {
+                  id: imgPoints[0].id,
+                  vector: imgVector,
+                  payload: {
+                    ...imgP,
+                    title: imgTitle,
+                    description: cleanDesc,
+                    tags: imgTags,
+                    updated_at: now.toISOString()
+                  }
+                }
+              ]
             })
           });
+
+          if (!updateRes.ok) {
+            console.warn(`Failed to update image point (${updateRes.status}): ${await updateRes.text()}`);
+          }
+
+          if (imgPoints.length > 1) {
+            const redundantIds = imgPoints.slice(1).map(p => p.id);
+            await deleteImagePoints(redundantIds, env);
+          }
         }
       } catch (err: any) {
         console.warn("Failed to sync images collection from update_note:", err?.message || err);
@@ -2861,7 +2909,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.6.2",
+          version: "1.6.3",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }

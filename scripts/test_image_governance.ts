@@ -270,7 +270,38 @@ async function run() {
     }
     console.log("✅ Brand new image with create_note: false correctly produced no note and accurate message:", insertNoNoteRes.message);
 
-    console.log("\n🎉 ALL 10 IMAGE GOVERNANCE TESTS PASSED WITH 100% SUCCESS!");
+    // -------------------------------------------------------------
+    // Test 11: Problem C - update_note (mode: append) must recompute images collection vector
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 11] Problem C: update_note (mode: append) recomputes image vector ---");
+    const probeKeyword = `紫蘑菇灯塔探针_${Date.now()}`;
+    const appendRes = await executeToolCall("update_note", {
+      id: insertWithNoteRes.note_id,
+      mode: "append",
+      content: `补充观察附记：此处特别标注关键代号 ${probeKeyword}`
+    }, testUserId, env);
+
+    if (!appendRes.success) {
+      throw new Error(`update_note append failed: ${JSON.stringify(appendRes)}`);
+    }
+    console.log(`✅ update_note (mode: append) succeeded with probe keyword: ${probeKeyword}`);
+
+    const searchProbeRes = await executeToolCall("search_memory", {
+      query: probeKeyword,
+      type: "image",
+      include_images: true
+    }, testUserId, env);
+
+    const probeMatchedImg = (searchProbeRes.images || []).find((img: any) => img.image_id === testImageId2);
+    if (!probeMatchedImg) {
+      throw new Error(`CRITICAL (Problem C): search_memory(type="image") failed to recall image by probeKeyword '${probeKeyword}' after update_note append! Result: ${JSON.stringify(searchProbeRes)}`);
+    }
+    console.log(`✅ search_memory(type="image") successfully recalled image by probeKeyword:`);
+    console.log(`   - Image ID: ${probeMatchedImg.image_id}`);
+    console.log(`   - Score: ${probeMatchedImg.score}`);
+    console.log(`   - Description snippet: ${probeMatchedImg.description.slice(-60)}`);
+
+    console.log("\n🎉 ALL 11 IMAGE GOVERNANCE TESTS PASSED WITH 100% SUCCESS!");
   } finally {
     console.log("\n🧹 Cleaning up test artifacts...");
     if (imagePointsToDelete.length > 0) {
