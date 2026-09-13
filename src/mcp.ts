@@ -28,6 +28,9 @@ import {
   searchMemoryPoints,
   searchImagePoints,
   getImagePoint,
+  findImagePointsByImageId,
+  deleteImagePoints,
+  findNoteByImageId,
   findEntityPoints,
   retireMemoryPoints,
   deleteMemoryPoints,
@@ -115,6 +118,41 @@ export function extractAssociatedImageId(payload: { image_id?: string; content?:
     const m = payload.content.match(/\[(?:Cloudflare Images ID|图片 ID):\s*([a-zA-Z0-9_-]+)\]/i);
     if (m) return m[1].trim();
   }
+  return null;
+}
+
+export async function resolveTargetMemoryPoint(
+  targetId: string,
+  userId: string,
+  env: McpEnv
+): Promise<{ pointId: string; payload: MemoryPointPayload; isLinkedFromImage?: boolean; imageId?: string } | null> {
+  const cleanId = (targetId || "").trim();
+  if (!cleanId) return null;
+
+  // 1. If valid UUID, try direct constancy_memories fetch first
+  const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(cleanId);
+  if (isUuid) {
+    const directPoint = await getPointById(cleanId, env);
+    if (directPoint && directPoint.payload && directPoint.payload.user_id === userId) {
+      return { pointId: cleanId, payload: directPoint.payload };
+    }
+  }
+
+  // 2. Check if cleanId matches an image in images collection (by point UUID or image_id)
+  const imgPoint = await getImagePoint(cleanId, userId, env);
+  const resolvedImageId = imgPoint?.payload?.image_id || (imgPoint ? imgPoint.id : cleanId);
+
+  // 3. Find associated note in constancy_memories
+  const linkedNote = await findNoteByImageId(resolvedImageId, userId, env);
+  if (linkedNote && linkedNote.payload && linkedNote.payload.user_id === userId) {
+    return {
+      pointId: linkedNote.id,
+      payload: linkedNote.payload,
+      isLinkedFromImage: true,
+      imageId: resolvedImageId
+    };
+  }
+
   return null;
 }
 
@@ -943,28 +981,62 @@ export async function executeToolCall(
     }
 
     // Format visual image results with ready-to-use signed CDN URLs and curl commands
-    const imageResults = await Promise.all((imageCandidates || []).map(async item => {
+    // 🌟 FIX-3 (方案 B): 实时联查关联便签，以主库 (constancy_memories) 活跃便签的描述与治理注记为唯一权威
+    const imageResultsRaw = await Promise.all((imageCandidates || []).map(async item => {
       const p = item.payload || {};
       const imgId = p.image_id || item.id;
       const variants = await getSignedImageVariants(imgId, env, 7200);
+
+      const linkedNote = await findNoteByImageId(imgId, userId, env);
+      const noteP = linkedNote?.payload;
+
+      // Authoritative description: prefer active note content (strip trailing CF image ID tag)
+      let displayDescription = p.description || "";
+      if (noteP?.content) {
+        displayDescription = noteP.content.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]\s*$/i, "").trim();
+      }
+
+      const annotations = noteP?.annotations && noteP.annotations.length > 0 ? noteP.annotations : undefined;
+      const isRetired = Boolean(noteP?.retired || p.retired);
+      const statusBadge = isRetired ? "⚪ 废弃归档" : (noteP?.annotations?.length ? "🟡 存疑更正" : "🟢 确信有效");
+
       return {
         image_id: imgId,
-        title: p.title || p.filename || "视觉图像资产",
+        title: noteP?.title || p.title || p.filename || "视觉图像资产",
         filename: p.filename || "image.jpg",
-        description: p.description || "",
+        description: displayDescription,
         score: Number((item.score || 0).toFixed(4)),
-        tags: p.tags || [],
+        tags: noteP?.tags || p.tags || [],
         exif: p.exif || undefined,
-        location: p.location || undefined,
-        captured_at: p.captured_at || p.created_at || undefined,
+        location: p.location || noteP?.location || undefined,
+        captured_at: p.captured_at || noteP?.captured_at || p.created_at || undefined,
         created_at: p.created_at,
         expires_in: 7200,
         url: variants.public,
         variants,
         variant_guide: AI_VISION_VARIANT_GUIDE,
-        curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${variants.public}"`
+        curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${variants.public}"`,
+        note_id: linkedNote?.id || undefined,
+        annotations,
+        has_annotations: Boolean(annotations && annotations.length > 0),
+        status_badge: statusBadge,
+        predecessor: noteP?.predecessor || undefined,
+        superseded_by: noteP?.superseded_by || undefined,
+        retired: isRetired ? true : undefined
       };
     }));
+
+    // Deduplicate imageResults by image_id (keep highest score) and filter retired if not requested
+    const seenImgIds = new Set<string>();
+    const imageResults: typeof imageResultsRaw = [];
+    for (const img of imageResultsRaw) {
+      if (img.image_id) {
+        if (seenImgIds.has(img.image_id)) continue;
+        seenImgIds.add(img.image_id);
+      }
+      if (img.retired && !includeRetired) continue;
+      imageResults.push(img);
+    }
 
     // Deduplicate: If an image note's associated visual image is already presented in imageResults,
     // filter out the duplicate text note so it doesn't waste a memory result slot or clutter LLM context.
@@ -1081,18 +1153,19 @@ export async function executeToolCall(
 
   // 4. Tool: confirm_memory
   if (name === "confirm_memory") {
-    const pointId = (args.id || "").trim();
-    if (!pointId) throw new Error("Missing memory id");
+    const rawId = (args.id || "").trim();
+    if (!rawId) throw new Error("Missing memory id");
     const note = (args.note || "").trim();
     const newCh = typeof args.c_h === "number" ? args.c_h : undefined;
     const revive = Boolean(args.revive);
 
-    const point = await getPointById(pointId, env);
-    if (!point || !point.payload || point.payload.user_id !== userId) {
-      throw new Error(`Memory point '${pointId}' not found or unauthorized`);
+    const resolved = await resolveTargetMemoryPoint(rawId, userId, env);
+    if (!resolved || !resolved.payload || resolved.payload.user_id !== userId) {
+      throw new Error(`Memory point or associated image '${rawId}' not found or unauthorized`);
     }
 
-    const p = point.payload;
+    const pointId = resolved.pointId;
+    const p = resolved.payload;
 
     if (p.retired && !revive) {
       throw new Error(`❌ 记忆 [${pointId}] 处于【已废弃归档】状态（原因: ${p.retired_reason || "无"}）。如需推翻废弃并满血复活，请明确传入 revive: true。`);
@@ -1158,16 +1231,17 @@ export async function executeToolCall(
 
   // 5. Tool: retire_memory
   if (name === "retire_memory") {
-    const pointId = (args.id || "").trim();
+    const rawId = (args.id || "").trim();
     const reason = (args.reason || "").trim();
-    if (!pointId || !reason) throw new Error("Missing id or reason");
+    if (!rawId || !reason) throw new Error("Missing id or reason");
 
-    const point = await getPointById(pointId, env);
-    if (!point || !point.payload || point.payload.user_id !== userId) {
-      throw new Error(`Memory point '${pointId}' not found or unauthorized`);
+    const resolved = await resolveTargetMemoryPoint(rawId, userId, env);
+    if (!resolved || !resolved.payload || resolved.payload.user_id !== userId) {
+      throw new Error(`Memory point or associated image '${rawId}' not found or unauthorized`);
     }
 
-    const p = point.payload;
+    const pointId = resolved.pointId;
+    const p = resolved.payload;
     const dateTag = now.toISOString().slice(0, 10);
     let retiredContent = p.content;
     if (!retiredContent.startsWith("【已废弃/失效归档")) {
@@ -1189,6 +1263,28 @@ export async function executeToolCall(
     };
 
     await setPointPayload(pointId, payloadUpdate, env);
+
+    // If linked from an image, also retire point(s) in images collection
+    const resolvedImageId = resolved.imageId || extractAssociatedImageId(p);
+    if (resolvedImageId) {
+      const imgPoints = await findImagePointsByImageId(resolvedImageId, userId, env);
+      if (imgPoints.length > 0) {
+        const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
+        for (const ipt of imgPoints) {
+          await fetch(`${qdrantUrl}/collections/images/points/payload?wait=true`, {
+            method: "POST",
+            headers: {
+              "api-key": env.QDRANT_API_KEY?.trim() || "",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              points: [ipt.id],
+              payload: { retired: true, retired_at: new Date().toISOString(), retired_reason: reason }
+            })
+          });
+        }
+      }
+    }
 
     if (p.pending_user_confirmation) {
       await updateCaseConcerns(userId, pointId, "USER-EXPIRE", "RESOLVED", "EXPIRE", `用户本人核实验证并宣告失效归档: ${reason}`, env);
@@ -2125,23 +2221,53 @@ export async function executeToolCall(
       }
     }
 
-    const title = (args.title || "").trim();
-    const filename = (args.filename || "image.jpg").trim();
-    const tags = Array.isArray(args.tags) ? args.tags.map((t: any) => String(t).trim()).filter(Boolean) : [];
-    if (!tags.includes("image")) tags.push("image");
+    // 🌟 FIX-1: Check if an image point already exists in images collection (True Upsert by image_id)
+    const existingImgPoints = await findImagePointsByImageId(imageId, userId, env);
+    const existingImgPoint = existingImgPoints[0] || null;
+    const isUpdate = Boolean(existingImgPoint);
+    const imagePointId = existingImgPoint ? existingImgPoint.id : crypto.randomUUID();
+
+    // 🌟 FIX-2: Resilient tags parsing (array, JSON string, comma-separated) and inheritance
+    const rawTags = args.tags ?? args.tag;
+    let inputTags: string[] = [];
+    if (Array.isArray(rawTags)) {
+      inputTags = rawTags.map((t: any) => String(t).trim()).filter(Boolean);
+    } else if (typeof rawTags === "string") {
+      try {
+        const parsed = JSON.parse(rawTags);
+        if (Array.isArray(parsed)) {
+          inputTags = parsed.map((t: any) => String(t).trim()).filter(Boolean);
+        } else {
+          inputTags = rawTags.split(/[,，\s]+/).map(t => t.trim()).filter(Boolean);
+        }
+      } catch {
+        inputTags = rawTags.split(/[,，\s]+/).map(t => t.trim()).filter(Boolean);
+      }
+    }
+
+    // If updating and no tags passed, inherit existing tags
+    if (inputTags.length === 0 && existingImgPoint?.payload?.tags && Array.isArray(existingImgPoint.payload.tags)) {
+      inputTags = existingImgPoint.payload.tags;
+    }
+    const tags = [...new Set([...inputTags, "image"])];
+
+    const title = (args.title || "").trim() || (existingImgPoint?.payload?.title || (args.filename || "image.jpg").trim());
+    const filename = (args.filename || "").trim() || existingImgPoint?.payload?.filename || "image.jpg";
 
     let location: { lat: number; lon: number } | null = null;
     if (typeof args.latitude === "number" && typeof args.longitude === "number") {
       location = { lat: args.latitude, lon: args.longitude };
     }
-
-    const exif = args.exif && typeof args.exif === "object" ? { ...args.exif } : null;
+    const exif = args.exif && typeof args.exif === "object" ? { ...args.exif } : (existingImgPoint?.payload?.exif || null);
     if (!location && exif) {
       const eLat = exif.latitude ?? exif.lat;
       const eLon = exif.longitude ?? exif.lon;
       if (typeof eLat === "number" && typeof eLon === "number") {
         location = { lat: eLat, lon: eLon };
       }
+    }
+    if (!location && existingImgPoint?.payload?.location) {
+      location = existingImgPoint.payload.location;
     }
 
     const nowIso = now.toISOString();
@@ -2154,6 +2280,9 @@ export async function executeToolCall(
     if (!capturedAtIso && exif?.dateTime) {
       capturedAtIso = normalizeIsoDate(exif.dateTime);
     }
+    if (!capturedAtIso && existingImgPoint?.payload?.captured_at) {
+      capturedAtIso = existingImgPoint.payload.captured_at;
+    }
     if (!capturedAtIso) {
       capturedAtIso = nowIso;
     }
@@ -2163,12 +2292,13 @@ export async function executeToolCall(
       exif.dateTime = capturedAtIso;
     }
 
+    const createdAt = existingImgPoint?.payload?.created_at || nowIso;
+
     // Vectorize description with Voyage Multimodal 3.5 (1024-dim)
     const textToEmbed = title ? `${title}\n${description}\n${tags.join(" ")}` : `${description}\n${tags.join(" ")}`;
     const vector = await getEmbedding(textToEmbed, env, "document");
 
-    // 1. Ingest into Qdrant 'images' collection
-    const imagePointId = crypto.randomUUID();
+    // 1. Ingest into Qdrant 'images' collection (Upsert in place)
     const qdrantUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points?wait=true`;
     const imagePayload = {
       user_id: userId,
@@ -2180,7 +2310,8 @@ export async function executeToolCall(
       exif,
       location,
       captured_at: capturedAtIso,
-      created_at: nowIso,
+      created_at: createdAt,
+      updated_at: nowIso,
       source: "claude"
     };
 
@@ -2207,49 +2338,75 @@ export async function executeToolCall(
       throw new Error(`Qdrant upsert to 'images' collection failed (${imageRes.status}): ${err}`);
     }
 
-    // 2. Ingest into Constancy MCP 'constancy_memories' collection as Note
+    // Clean up any historical duplicate points in images collection
+    if (existingImgPoints.length > 1) {
+      const redundantIds = existingImgPoints.slice(1).map(p => p.id);
+      await deleteImagePoints(redundantIds, env);
+    }
+
+    // 2. Ingest or update Note in 'constancy_memories' collection
     let notePointId: string | null = null;
     const createNote = args.create_note !== false;
     if (createNote) {
-      notePointId = crypto.randomUUID();
+      const existingNote = await findNoteByImageId(imageId, userId, env);
       const noteTitle = title || `[视觉资产] ${description.slice(0, 24)}...`;
       const noteContent = `${description}\n\n[Cloudflare Images ID: ${imageId}]`;
-      const notePayload: MemoryPointPayload = {
-        user_id: userId,
-        content: noteContent,
-        timestamp: capturedAtIso || nowIso,
-        captured_at: capturedAtIso || nowIso,
-        location: location || undefined,
-        date: capturedAtIso ? capturedAtIso.slice(0, 10) : todayStr,
-        type: "note",
-        entities: [],
-        tags: ["image", "gallery", ...tags],
-        ch_prior: 11.0, // High constancy for assets
-        h_spectrum: injectIntent(new Array(7).fill(0), 1.0),
-        t_last_update: nowMs,
-        t_last_strong: nowMs,
-        title: noteTitle,
-        image_id: imageId,
-        mime_type: "image/jpeg"
-      };
+      const noteTags = [...new Set(["image", "gallery", ...tags])];
 
-      await upsertMemoryPoint(notePointId, vector, notePayload, env);
+      if (existingNote && existingNote.payload) {
+        // Update existing active note in place
+        notePointId = existingNote.id;
+        const notePayloadUpdate: MemoryPointPayload = {
+          ...existingNote.payload,
+          title: noteTitle,
+          content: noteContent,
+          tags: noteTags,
+          location: location || existingNote.payload.location || undefined,
+          captured_at: capturedAtIso || existingNote.payload.captured_at || nowIso,
+          t_last_update: nowMs,
+          image_id: imageId
+        };
+        await upsertMemoryPoint(notePointId, vector, notePayloadUpdate, env);
+      } else {
+        notePointId = crypto.randomUUID();
+        const notePayload: MemoryPointPayload = {
+          user_id: userId,
+          content: noteContent,
+          timestamp: capturedAtIso || nowIso,
+          captured_at: capturedAtIso || nowIso,
+          location: location || undefined,
+          date: capturedAtIso ? capturedAtIso.slice(0, 10) : todayStr,
+          type: "note",
+          entities: [],
+          tags: noteTags,
+          ch_prior: 11.0, // High constancy for assets
+          h_spectrum: injectIntent(new Array(7).fill(0), 1.0),
+          t_last_update: nowMs,
+          t_last_strong: nowMs,
+          title: noteTitle,
+          image_id: imageId,
+          mime_type: "image/jpeg"
+        };
+        await upsertMemoryPoint(notePointId, vector, notePayload, env);
+      }
     }
 
     return {
       success: true,
       image_id: imageId,
       point_id: imagePointId,
+      is_update: isUpdate,
       note_id: notePointId,
       title: title || filename,
-      message: `🖼️ 视觉资产成功入库！已录入后花园 (search.kufof.uk)${createNote ? " 并同步在 Constancy 便签库创建了对应笔记" : ""}。`
+      tags,
+      message: `🖼️ 视觉资产成功${isUpdate ? "更新 (原地 Update)" : "入库"}！已同步录入图库与外脑便签。`
     };
   }
 
   // 15. Tool: annotate_memory
   if (name === "annotate_memory") {
-    const pointId = (args.id || "").trim();
-    if (!pointId) throw new Error("Missing id");
+    const rawId = (args.id || "").trim();
+    if (!rawId) throw new Error("Missing id");
     const kind = (args.kind || "").trim().toLowerCase() as AnnotationKind;
     if (!["correction", "dispute", "context"].includes(kind)) {
       throw new Error(`Invalid kind: '${kind}'. Must be one of: 'correction', 'dispute', 'context'`);
@@ -2260,6 +2417,12 @@ export async function executeToolCall(
     const rawSource = String(args.source || "user_stated").toLowerCase().trim();
     const source: MemorySourceType = (["user_stated", "model_inferred", "external"].includes(rawSource) ? rawSource : "user_stated") as MemorySourceType;
     const refId = typeof args.ref_id === "string" ? args.ref_id.trim() : undefined;
+
+    const resolved = await resolveTargetMemoryPoint(rawId, userId, env);
+    if (!resolved || !resolved.payload || resolved.payload.user_id !== userId) {
+      throw new Error(`Memory point or associated image '${rawId}' not found or unauthorized.`);
+    }
+    const pointId = resolved.pointId;
 
     const annotationId = crypto.randomUUID();
     const annotation: MemoryAnnotation = {
@@ -2279,36 +2442,40 @@ export async function executeToolCall(
       context: "📝 补充附注"
     };
 
+    const entityLabel = resolved.isLinkedFromImage ? `图片 [${rawId}] 关联便签 [${pointId}]` : `记忆 '${pointId}'`;
+
     return {
       success: true,
       id: pointId,
+      target_id: rawId,
       annotation_id: annotationId,
       kind,
       kind_label: kindEmojiMap[kind],
       source,
       source_badge: getSourceBadge(source),
       total_annotations: updatedPayload.annotations?.length || 1,
-      message: `📌 已成功向记忆 '${pointId}' 追加不可变附注 [类型: ${kindEmojiMap[kind]}, 来源: ${getSourceBadge(source)}]。原文一字不动，保留因果可证伪性；后续检索将并置展示更正警示。`
+      message: `📌 已成功向${entityLabel}追加不可变附注 [类型: ${kindEmojiMap[kind]}, 来源: ${getSourceBadge(source)}]。原文一字不动，保留因果可证伪性；后续检索将并置展示更正警示。`
     };
   }
 
   // 16. Tool: submit_concern
   if (name === "submit_concern") {
-    const memoryId = (args.memory_id || "").trim();
+    const rawMemoryId = (args.memory_id || "").trim();
     const reason = (args.reason || "").trim();
     const evidence = (args.evidence || "").trim();
     const severity: ConcernSeverity = args.severity || "medium";
     const interactionMode: InteractionMode = args.interaction_mode || "silent";
 
-    if (!memoryId) throw new Error("Missing required argument: memory_id");
+    if (!rawMemoryId) throw new Error("Missing required argument: memory_id");
     if (!reason) throw new Error("Missing required argument: reason");
     if (!evidence) throw new Error("Missing required argument: evidence (现实证据链必须包含用户近期原话引言)");
 
-    // Target memory validation
-    const targetPoint = await getPointById(memoryId, env);
-    if (!targetPoint || !targetPoint.payload) {
-      throw new Error(`目标记忆点 '${memoryId}' 未找到，请核实 ID 是否准确。`);
+    // Target memory validation with polymorphic image resolution
+    const resolved = await resolveTargetMemoryPoint(rawMemoryId, userId, env);
+    if (!resolved || !resolved.payload || resolved.payload.user_id !== userId) {
+      throw new Error(`目标记忆点或关联图片 '${rawMemoryId}' 未找到，请核实 ID 是否准确。`);
     }
+    const memoryId = resolved.pointId;
 
     const concernId = crypto.randomUUID();
     const nowIso = new Date().toISOString();
@@ -2604,7 +2771,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.6.0",
+          version: "1.6.1",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }

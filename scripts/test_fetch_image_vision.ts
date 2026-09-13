@@ -31,10 +31,10 @@ async function run() {
       params: {}
     }, testUserId, env);
 
-    if (initRes.result?.serverInfo?.version !== "1.6.0") {
-      throw new Error(`Expected serverInfo.version to be 1.6.0, got: ${initRes.result?.serverInfo?.version}`);
+    if (!initRes.result?.serverInfo?.version?.startsWith("1.6.")) {
+      throw new Error(`Expected serverInfo.version to be 1.6.x, got: ${initRes.result?.serverInfo?.version}`);
     }
-    console.log("✅ Initialize response validated: version 1.6.0");
+    console.log(`✅ Initialize response validated: version ${initRes.result?.serverInfo?.version}`);
 
     // -------------------------------------------------------------
     // Test 2: MCP tools/list includes fetch_image_vision with guardrails

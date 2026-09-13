@@ -573,6 +573,128 @@ export async function getImagePoint(
   return null;
 }
 
+export async function findImagePointsByImageId(
+  imageId: string,
+  userId: string,
+  env: QdrantEnv
+): Promise<Array<{ id: string; payload?: any }>> {
+  const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
+  const scrollUrl = `${qdrantUrl}/collections/images/points/scroll`;
+  const scrollRes = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 10,
+      with_payload: true,
+      with_vector: false,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } },
+          { key: "image_id", match: { value: imageId } }
+        ]
+      }
+    })
+  });
+
+  if (scrollRes.ok) {
+    const scrollData: any = await scrollRes.json();
+    return scrollData.result?.points || [];
+  }
+  return [];
+}
+
+export async function deleteImagePoints(
+  pointIds: string[],
+  env: QdrantEnv
+): Promise<void> {
+  if (!pointIds || pointIds.length === 0) return;
+  const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
+  const url = `${qdrantUrl}/collections/images/points/delete?wait=true`;
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({ points: pointIds })
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.warn(`deleteImagePoints error (${res.status}): ${errText}`);
+  }
+}
+
+export async function findNoteByImageId(
+  imageId: string,
+  userId: string,
+  env: QdrantEnv
+): Promise<{ id: string; payload?: MemoryPointPayload } | null> {
+  const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
+  const scrollUrl = `${qdrantUrl}/collections/${COLLECTION_NAME}/points/scroll`;
+
+  // 1. Try payload.image_id match
+  const res1 = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 10,
+      with_payload: true,
+      with_vector: false,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } },
+          { key: "image_id", match: { value: imageId } }
+        ]
+      }
+    })
+  });
+
+  let candidates: Array<{ id: string; payload?: MemoryPointPayload }> = [];
+  if (res1.ok) {
+    const data1: any = await res1.json();
+    candidates = data1.result?.points || [];
+  }
+
+  // 2. If not found, scroll recent notes with 'image' tag and match content
+  if (candidates.length === 0) {
+    const res2 = await qdrantFetch(scrollUrl, env, {
+      method: "POST",
+      body: JSON.stringify({
+        limit: 100,
+        with_payload: true,
+        with_vector: false,
+        filter: {
+          must: [
+            { key: "user_id", match: { value: userId } },
+            { key: "tags", match: { value: "image" } }
+          ]
+        }
+      })
+    });
+    if (res2.ok) {
+      const data2: any = await res2.json();
+      const points = data2.result?.points || [];
+      for (const pt of points) {
+        const content = pt.payload?.content || "";
+        if (content.includes(imageId)) {
+          candidates.push(pt);
+        }
+      }
+    }
+  }
+
+  if (candidates.length === 0) return null;
+
+  // Prefer active (non-retired, non-expired) note
+  const activeNote = candidates.find(c => !c.payload?.retired && c.payload?.status !== "expired");
+  if (activeNote) return activeNote;
+
+  // If all are retired/superseded, follow superseded_by chain if available
+  const newest = candidates[0];
+  if (newest.payload?.superseded_by) {
+    const successor = await getPointById(newest.payload.superseded_by, env);
+    if (successor && successor.payload && successor.payload.user_id === userId) {
+      return successor;
+    }
+  }
+
+  return newest;
+}
+
 export async function findEntityPoints(
   entityName: string,
   userId: string,
