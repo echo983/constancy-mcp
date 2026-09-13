@@ -161,7 +161,7 @@ export default {
     if (url.pathname === "/api/health") {
       return jsonResponse({
         status: "healthy",
-        version: "1.5.0",
+        version: "1.6.0",
         domain,
         time: new Date().toISOString(),
         qdrant_target: env.QDRANT_URL
@@ -203,11 +203,12 @@ export default {
 https://${domain}/sse (Legacy SSE)</pre>
     </div>
 
-    <h3>内置核心工具 (15 Tools)</h3>
+    <h3>内置核心工具 (16 Tools)</h3>
     <ul>
       <li><b>log_memory / search_memory</b>: 认知来源定性、待办/决策硬门禁拦截、时空结构化过滤、多模态检索与 ACTD 时效仲裁</li>
       <li><b>confirm_memory / retire_memory / annotate_memory</b>: 强信号复核加温、墓碑失效归档与非破坏性不可变勘误注记（保证因果可证伪性）</li>
       <li><b>save_note / get_note / list_notes / update_note</b>: 极简便签记事本、标签枚举待办与多版本修订审计</li>
+      <li><b>fetch_image_vision</b>: 视觉直读，将图库图片直接载入模型原生视觉通道（无需沙箱下载，像素计费，极低 Token 开销）</li>
       <li><b>get_blob_url / create_upload_url</b>: 便签二进制 Capability 直传直下，沙箱零 Token 传输二进制</li>
       <li><b>request_image_upload / commit_image_record</b>: 高画质多模态图片直传流水线、EXIF 时空元数据与视觉特征向量入库</li>
       <li><b>get_daily_timeline</b>: 提取某日时间线碎片，供大模型生成每日研发日记（DevLog）</li>

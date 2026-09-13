@@ -342,6 +342,7 @@ export async function getPointById(
   if (!res.ok) {
     if (res.status === 404) return null;
     const errText = await res.text();
+    if (res.status === 400 && errText.includes("Can not recognize")) return null;
     throw new Error(`Qdrant getPointById error (${res.status}): ${errText}`);
   }
   const data: any = await res.json();
