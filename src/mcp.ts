@@ -601,7 +601,7 @@ export const MCP_TOOLS = [
         },
         create_note: {
           type: "boolean",
-          description: "可选。是否同步在 Constancy 便签库创建一条关联 Note 便签，默认 true"
+          description: "可选。若图库中该图片尚未创建关联便签，是否在 Constancy 便签库创建关联 Note 便签（默认 true）。注意：若关联便签已存在，系统将无条件强制同步更新该便签并记录 revisions 审计链，不受此参数限制。"
         }
       },
       required: ["image_id", "description"]
@@ -1022,6 +1022,7 @@ export async function executeToolCall(
         status_badge: statusBadge,
         predecessor: noteP?.predecessor || undefined,
         superseded_by: noteP?.superseded_by || undefined,
+        revisions_count: Array.isArray(noteP?.revisions) ? noteP.revisions.length : 0,
         retired: isRetired ? true : undefined
       };
     }));
@@ -1737,6 +1738,38 @@ export async function executeToolCall(
       await setPointPayload(pointId, p, env);
     }
 
+    // Bidirectional sync: if this note is associated with a Cloudflare Image, sync the images collection point
+    const assocImgId = p.image_id || extractAssociatedImageId(p);
+    if (assocImgId && (contentChanged || titleChanged)) {
+      try {
+        const imgPoints = await findImagePointsByImageId(assocImgId, userId, env);
+        if (imgPoints.length > 0) {
+          const cleanDesc = newContent.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]\s*$/i, "").trim();
+          const imgP = imgPoints[0].payload || {};
+          const qdrantUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points/payload?wait=true`;
+          await fetch(qdrantUrl, {
+            method: "POST",
+            headers: {
+              "api-key": env.QDRANT_API_KEY?.trim(),
+              "Content-Type": "application/json",
+              "User-Agent": "curl/8.14.1 (constancy-mcp worker)"
+            },
+            body: JSON.stringify({
+              points: [imgPoints[0].id],
+              payload: {
+                title: newTitle || imgP.title,
+                description: cleanDesc,
+                tags: newTags.filter((t: string) => t !== "gallery" && t !== "note"),
+                updated_at: now.toISOString()
+              }
+            })
+          });
+        }
+      } catch (err: any) {
+        console.warn("Failed to sync images collection from update_note:", err?.message || err);
+      }
+    }
+
     return {
       success: true,
       id: pointId,
@@ -2346,49 +2379,105 @@ export async function executeToolCall(
 
     // 2. Ingest or update Note in 'constancy_memories' collection
     let notePointId: string | null = null;
-    const createNote = args.create_note !== false;
-    if (createNote) {
-      const existingNote = await findNoteByImageId(imageId, userId, env);
-      const noteTitle = title || `[视觉资产] ${description.slice(0, 24)}...`;
-      const noteContent = `${description}\n\n[Cloudflare Images ID: ${imageId}]`;
-      const noteTags = [...new Set(["image", "gallery", ...tags])];
+    let revisionsCount = 0;
+    let noteAction: "updated" | "created" | "skipped" = "skipped";
 
-      if (existingNote && existingNote.payload) {
-        // Update existing active note in place
-        notePointId = existingNote.id;
-        const notePayloadUpdate: MemoryPointPayload = {
-          ...existingNote.payload,
-          title: noteTitle,
-          content: noteContent,
-          tags: noteTags,
-          location: location || existingNote.payload.location || undefined,
-          captured_at: capturedAtIso || existingNote.payload.captured_at || nowIso,
-          t_last_update: nowMs,
-          image_id: imageId
+    const existingNote = await findNoteByImageId(imageId, userId, env);
+    const noteTitle = title || `[视觉资产] ${description.slice(0, 24)}...`;
+    const noteContent = `${description}\n\n[Cloudflare Images ID: ${imageId}]`;
+    const noteTags = [...new Set(["image", "gallery", ...tags])];
+
+    if (existingNote && existingNote.payload) {
+      // 🌟 FIX A & B: 无论 create_note 取值为何，只要存在关联便签，必须强制同步，绝不留滞后孤岛！
+      // 强制写入 revisions 审计链（最多保留最近 5 版），确保权威正文的每一次变动均有据可查。
+      notePointId = existingNote.id;
+      noteAction = "updated";
+
+      const oldP = existingNote.payload;
+      const oldContent = oldP.content || "";
+      const oldTitle = oldP.title || "";
+      const oldTags = Array.isArray(oldP.tags) ? oldP.tags : [];
+
+      const contentChanged = oldContent !== noteContent;
+      const titleChanged = oldTitle !== noteTitle;
+      const tagsChanged = JSON.stringify(oldTags.slice().sort()) !== JSON.stringify(noteTags.slice().sort());
+
+      const revisions: NoteRevision[] = Array.isArray(oldP.revisions) ? [...oldP.revisions] : [];
+
+      if (contentChanged || titleChanged || tagsChanged) {
+        const previousSnapshot: NoteRevision = {
+          timestamp: nowIso,
+          content: oldContent,
+          title: oldTitle || undefined,
+          tags: [...oldTags],
+          mime_type: oldP.mime_type,
+          sha256: oldP.sha256,
+          reason: isUpdate ? "commit_image_record 视觉描述与元数据同步更新" : "commit_image_record 便签同步更新"
         };
-        await upsertMemoryPoint(notePointId, vector, notePayloadUpdate, env);
-      } else {
-        notePointId = crypto.randomUUID();
-        const notePayload: MemoryPointPayload = {
-          user_id: userId,
-          content: noteContent,
-          timestamp: capturedAtIso || nowIso,
-          captured_at: capturedAtIso || nowIso,
-          location: location || undefined,
-          date: capturedAtIso ? capturedAtIso.slice(0, 10) : todayStr,
-          type: "note",
-          entities: [],
-          tags: noteTags,
-          ch_prior: 11.0, // High constancy for assets
-          h_spectrum: injectIntent(new Array(7).fill(0), 1.0),
-          t_last_update: nowMs,
-          t_last_strong: nowMs,
-          title: noteTitle,
-          image_id: imageId,
-          mime_type: "image/jpeg"
-        };
-        await upsertMemoryPoint(notePointId, vector, notePayload, env);
+        revisions.push(previousSnapshot);
+        if (revisions.length > 5) {
+          revisions.splice(0, revisions.length - 5);
+        }
       }
+      revisionsCount = revisions.length;
+
+      // 认知动力学：若内容或标题发生实质变更，重新注入意图能量，激活半衰期
+      let hSpectrum = oldP.h_spectrum || new Array(7).fill(0);
+      let tLastStrong = oldP.t_last_strong || nowMs;
+      if (contentChanged || titleChanged) {
+        const decayedH = decaySpectrum(hSpectrum, oldP.t_last_update || nowMs, nowMs);
+        hSpectrum = injectIntent(decayedH, 1.0);
+        tLastStrong = nowMs;
+      }
+
+      const notePayloadUpdate: MemoryPointPayload = {
+        ...oldP,
+        title: noteTitle,
+        content: noteContent,
+        tags: noteTags,
+        location: location || oldP.location || undefined,
+        captured_at: capturedAtIso || oldP.captured_at || nowIso,
+        t_last_update: nowMs,
+        t_last_strong: tLastStrong,
+        h_spectrum: hSpectrum,
+        image_id: imageId,
+        revisions
+      };
+
+      await upsertMemoryPoint(notePointId, vector, notePayloadUpdate, env);
+    } else if (args.create_note !== false) {
+      // 若关联便签尚不存在，且用户未显式指定 create_note: false，则初次创建外脑便签
+      notePointId = crypto.randomUUID();
+      noteAction = "created";
+      const notePayload: MemoryPointPayload = {
+        user_id: userId,
+        content: noteContent,
+        timestamp: capturedAtIso || nowIso,
+        captured_at: capturedAtIso || nowIso,
+        location: location || undefined,
+        date: capturedAtIso ? capturedAtIso.slice(0, 10) : todayStr,
+        type: "note",
+        entities: [],
+        tags: noteTags,
+        ch_prior: 11.0, // High constancy for assets
+        h_spectrum: injectIntent(new Array(7).fill(0), 1.0),
+        t_last_update: nowMs,
+        t_last_strong: nowMs,
+        title: noteTitle,
+        image_id: imageId,
+        mime_type: "image/jpeg",
+        revisions: []
+      };
+      await upsertMemoryPoint(notePointId, vector, notePayload, env);
+    }
+
+    let noteMessageDetail = "";
+    if (noteAction === "updated") {
+      noteMessageDetail = `已同步更新关联外脑便签 [${notePointId}] (历史版本数: ${revisionsCount})`;
+    } else if (noteAction === "created") {
+      noteMessageDetail = `已同步新建外脑便签 [${notePointId}]`;
+    } else {
+      noteMessageDetail = "未创建外脑便签 (create_note=false 且无既有便签)";
     }
 
     return {
@@ -2397,9 +2486,10 @@ export async function executeToolCall(
       point_id: imagePointId,
       is_update: isUpdate,
       note_id: notePointId,
+      revisions_count: revisionsCount,
       title: title || filename,
       tags,
-      message: `🖼️ 视觉资产成功${isUpdate ? "更新 (原地 Update)" : "入库"}！已同步录入图库与外脑便签。`
+      message: `🖼️ 视觉资产成功${isUpdate ? "更新 (原地 Update)" : "入库"}！${noteMessageDetail}。`
     };
   }
 
@@ -2771,7 +2861,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.6.1",
+          version: "1.6.2",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }

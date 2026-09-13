@@ -200,9 +200,77 @@ async function run() {
     if (retiredFound) {
       throw new Error("Retired image was still returned in search_memory with include_retired: false!");
     }
-    console.log("✅ Verified retired image is filtered out when include_retired: false");
+    // -------------------------------------------------------------
+    // Test 8: Problem A - commit_image_record with create_note: false on existing note MUST sync note
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 8] Problem A: create_note: false with existing note still syncs ---");
+    const testImageId2 = `test_cf_img_note_sync_${Date.now()}`;
+    const insertWithNoteRes = await executeToolCall("commit_image_record", {
+      image_id: testImageId2,
+      title: "测试便签同步机柜",
+      description: "便签初次内容：机柜初始配置",
+      tags: ["rack", "initial"],
+      create_note: true
+    }, testUserId, env);
+    imagePointsToDelete.push(insertWithNoteRes.point_id);
+    if (insertWithNoteRes.note_id) pointsToDelete.push(insertWithNoteRes.note_id);
+    console.log(`✅ Initial insert with note created note_id: ${insertWithNoteRes.note_id}`);
 
-    console.log("\n🎉 ALL IMAGE GOVERNANCE TESTS PASSED WITH 100% SUCCESS!");
+    // Now update with create_note: false!
+    const updateWithCreateNoteFalseRes = await executeToolCall("commit_image_record", {
+      image_id: testImageId2,
+      title: "测试便签同步机柜 (更新)",
+      description: "便签更新内容：机柜已完成二次改造升级",
+      tags: ["rack", "upgraded"],
+      create_note: false
+    }, testUserId, env);
+
+    if (!updateWithCreateNoteFalseRes.note_id) {
+      throw new Error(`CRITICAL (Problem A): commit_image_record with create_note: false returned note_id: null even though note existed!`);
+    }
+    console.log(`✅ update with create_note: false correctly retained note_id: ${updateWithCreateNoteFalseRes.note_id}`);
+
+    // Verify note in Qdrant has updated content
+    const syncedNote = await findNoteByImageId(testImageId2, testUserId, env);
+    if (!syncedNote || !syncedNote.payload?.content.includes("机柜已完成二次改造升级")) {
+      throw new Error(`CRITICAL (Problem A): Note was NOT synced in Qdrant! Content: ${syncedNote?.payload?.content}`);
+    }
+    console.log("✅ Verified existing note was forcibly synced despite create_note: false!");
+
+    // -------------------------------------------------------------
+    // Test 9: Problem B - Revisions audit chain on commit_image_record
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 9] Problem B: Revisions audit chain on note sync ---");
+    if (!syncedNote.payload.revisions || syncedNote.payload.revisions.length === 0) {
+      throw new Error(`CRITICAL (Problem B): Revisions array is empty after note update!`);
+    }
+    const lastRev = syncedNote.payload.revisions[syncedNote.payload.revisions.length - 1];
+    if (!lastRev.content.includes("机柜初始配置")) {
+      throw new Error(`CRITICAL (Problem B): Previous content was not recorded in revision snapshot! Got: ${lastRev.content}`);
+    }
+    console.log(`✅ Verified revisions audit trail recorded: count=${syncedNote.payload.revisions.length}, previous snapshot preserved!`);
+
+    // -------------------------------------------------------------
+    // Test 10: Problem A edge case - create_note: false on brand new image
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 10] create_note: false with NO existing note ---");
+    const testImageId3 = `test_cf_img_no_note_${Date.now()}`;
+    const insertNoNoteRes = await executeToolCall("commit_image_record", {
+      image_id: testImageId3,
+      title: "无便签图片",
+      description: "纯图库图片，无需便签",
+      create_note: false
+    }, testUserId, env);
+    imagePointsToDelete.push(insertNoNoteRes.point_id);
+    if (insertNoNoteRes.note_id !== null) {
+      throw new Error(`Expected note_id to be null when create_note: false and no note exists, got: ${insertNoNoteRes.note_id}`);
+    }
+    if (!insertNoNoteRes.message.includes("未创建外脑便签")) {
+      throw new Error(`Expected message to accurately report note was not created, got: ${insertNoNoteRes.message}`);
+    }
+    console.log("✅ Brand new image with create_note: false correctly produced no note and accurate message:", insertNoNoteRes.message);
+
+    console.log("\n🎉 ALL 10 IMAGE GOVERNANCE TESTS PASSED WITH 100% SUCCESS!");
   } finally {
     console.log("\n🧹 Cleaning up test artifacts...");
     if (imagePointsToDelete.length > 0) {
