@@ -267,22 +267,21 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
     return renderCard(`❌ ${reason}（该 IP 剩余尝试次数：${remaining} 次）`, 401);
   };
 
-  // 1. Verify Email format and Whitelist (Fail-closed)
-  if (!submittedEmail) {
-    return recordFailure("请输入有效的授权邮箱。");
-  }
-
-  const whitelist = env.ALLOWED_EMAILS.split(",")
-    .map(e => e.trim().toLowerCase())
-    .filter(Boolean);
-  if (!whitelist.includes(submittedEmail)) {
-    return recordFailure(`邮箱 "${submittedEmail}" 不在授权白名单中，拒绝接入。`);
-  }
-
-  // 2. Determine Expected Passkey (Per-user passkeys take precedence over global ADMIN_PASSKEY)
+  // 1. Determine Expected Passkey & Whitelist Status (KV > USER_PASSKEYS secret > ADMIN_PASSKEY)
   let expectedPasskey: string | undefined = undefined;
 
-  if (env.USER_PASSKEYS) {
+  // 1A. Check dynamic Cloudflare KV store (e.g. user_passkey:user@example.com)
+  try {
+    const kvPasskey = await env.CONSTANCY_KV.get(`user_passkey:${submittedEmail}`);
+    if (kvPasskey) {
+      expectedPasskey = kvPasskey.trim();
+    }
+  } catch (e) {
+    console.error("Failed to read from CONSTANCY_KV:", e);
+  }
+
+  // 1B. Check static USER_PASSKEYS JSON mapping in worker secrets
+  if (!expectedPasskey && env.USER_PASSKEYS) {
     try {
       const userMap = JSON.parse(env.USER_PASSKEYS);
       if (typeof userMap === "object" && userMap !== null && userMap[submittedEmail]) {
@@ -293,8 +292,23 @@ export async function handleAuthorize(request: Request, env: AuthEnv): Promise<R
     }
   }
 
+  // 1C. Fallback to global ADMIN_PASSKEY
   if (!expectedPasskey && env.ADMIN_PASSKEY) {
     expectedPasskey = env.ADMIN_PASSKEY;
+  }
+
+  // 2. Verify Email format and Whitelist (Fail-closed)
+  if (!submittedEmail) {
+    return recordFailure("请输入有效的授权邮箱。");
+  }
+
+  const whitelist = (env.ALLOWED_EMAILS || "").split(",")
+    .map(e => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  const isWhitelisted = whitelist.includes(submittedEmail) || Boolean(expectedPasskey && expectedPasskey !== env.ADMIN_PASSKEY);
+  if (!isWhitelisted) {
+    return recordFailure(`邮箱 "${submittedEmail}" 不在授权白名单中，拒绝接入。`);
   }
 
   // Fail-closed if no passkey is defined for this user
