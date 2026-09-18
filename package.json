@@ -9,7 +9,8 @@
     "typecheck": "tsc --noEmit",
     "test:doctor": "tsx scripts/test_cognitive_hygiene.ts",
     "test:vision": "tsx scripts/test_fetch_image_vision.ts",
-    "test:gov": "tsx scripts/test_image_governance.ts"
+    "test:gov": "tsx scripts/test_image_governance.ts",
+    "test:isolation": "tsx scripts/test_user_isolation.ts"
   },
   "keywords": [
     "mcp",
