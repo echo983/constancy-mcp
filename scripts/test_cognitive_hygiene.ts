@@ -1,6 +1,6 @@
 import fs from "fs";
 import { executeToolCall, McpEnv } from "../src/mcp";
-import { getPointById, deleteMemoryPoints, CONCERNS_COLLECTION } from "../src/qdrant";
+import { getPointById, deleteMemoryPoints, CONCERNS_COLLECTION, submitConcernToQdrant } from "../src/qdrant";
 
 async function run() {
   console.log("🚀 Starting Cognitive Hygiene Doctor Integration Test...");
@@ -453,9 +453,84 @@ async function run() {
     if (foundAfter) {
       throw new Error("Escalated memory should no longer be in pending_confirmation_only search");
     }
-    console.log("✅ User confirmation loop fully closed!");
+    // -------------------------------------------------------------
+    // Test 15: Orphan / Deleted memory resolution resilience
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 15] Testing Orphan / Deleted target memory resolution ---");
+    const orphanMemId = crypto.randomUUID();
+    await submitConcernToQdrant({
+      id: crypto.randomUUID(),
+      user_id: testUserId,
+      memory_id: orphanMemId,
+      reason: "已被外部物理删除的记忆残留顾虑",
+      evidence: "用户原话：我早就删了这条了",
+      severity: "high",
+      interaction_mode: "silent",
+      status: "pending",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      duplicate_count: 1,
+      defer_count: 0
+    }, env);
 
-    console.log("\n🎉 ALL 14 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
+    const orphanCases = await executeToolCall("get_maintenance_cases", { limit: 5 }, testUserId, env);
+    const orphanCase = orphanCases.cases.find((c: any) => c.memory_id === orphanMemId);
+    if (!orphanCase) throw new Error("Expected triage case for orphan memory");
+    if (orphanCase.target_memory.status !== "deleted") {
+      throw new Error(`Expected orphan target_memory status to be 'deleted', got ${orphanCase.target_memory.status}`);
+    }
+
+    // Doctor resolves the orphan case with EXPIRE (should NOT throw!)
+    const orphanResolveRes = await executeToolCall("resolve_maintenance_case", {
+      case_id: orphanCase.case_id,
+      memory_id: orphanMemId,
+      verdict: "resolved", // test lowercase
+      treatment: "expire", // test lowercase
+      doctor_notes: "目标记忆已物理删除，予以平稳销案归档"
+    }, testUserId, env);
+
+    if (!orphanResolveRes.success) throw new Error("Expected orphan resolution to succeed");
+    if (orphanResolveRes.concerns_closed < 1) throw new Error("Expected orphan concern to be closed");
+    console.log("✅ Orphan / Deleted memory case resolved smoothly without error!");
+
+    // -------------------------------------------------------------
+    // Test 16: Elastic parameter resilience (CASE- prefix in memory_id, alias content field)
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 16] Testing Elastic Parameter Resilience ---");
+    const memElastic = await executeToolCall("log_memory", {
+      content: "用户喜欢在周六早上去游泳",
+      c_h: 9.0,
+      type: "preference",
+      source: "user_stated"
+    }, testUserId, env);
+    pointsToDelete.push(memElastic.id);
+
+    await executeToolCall("submit_concern", {
+      memory_id: memElastic.id,
+      reason: "时间变更为周日",
+      evidence: "用户原话：现在改成周日早上去游泳了",
+      severity: "high"
+    }, testUserId, env);
+
+    // Doctor calls with CASE- prefix as memory_id, content in 'content' field, uppercase/lowercase mixed
+    const elasticResolveRes = await executeToolCall("resolve_maintenance_case", {
+      case_id: `CASE-${memElastic.id.slice(0, 8).toUpperCase()}`,
+      memory_id: `CASE-${memElastic.id.slice(0, 8).toUpperCase()}`, // passing case_id into memory_id
+      verdict: "RESOLVED",
+      treatment: "UPDATE",
+      content: "用户现在习惯在周日早上去游泳锻炼", // alias field
+      doctor_notes: "根据最新原话更新游泳时间至周日"
+    }, testUserId, env);
+
+    if (!elasticResolveRes.success) throw new Error("Expected elastic resolution to succeed");
+    const memElasticAfter = await getPointById(memElastic.id, env);
+    if (!memElasticAfter.payload?.superseded_by) {
+      throw new Error("Expected elastic resolution to create superseded_by link");
+    }
+    pointsToDelete.push(memElasticAfter.payload.superseded_by);
+    console.log("✅ Elastic parameter resilience successfully verified!");
+
+    console.log("\n🎉 ALL 16 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
 
   } finally {
     // -------------------------------------------------------------

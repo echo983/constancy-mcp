@@ -349,6 +349,34 @@ export async function getPointById(
   return data.result || null;
 }
 
+export async function findMemoryPointByPrefix(
+  prefix: string,
+  userId: string,
+  env: QdrantEnv
+): Promise<{ id: string; payload?: MemoryPointPayload } | null> {
+  const cleanPrefix = prefix.trim().toLowerCase();
+  if (!cleanPrefix) return null;
+  const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/scroll`;
+  const res = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 100,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } }
+        ]
+      },
+      with_payload: true,
+      with_vector: false
+    })
+  });
+  if (!res.ok) return null;
+  const data: any = await res.json();
+  const points: any[] = data.result?.points || [];
+  const found = points.find((p: any) => String(p.id).toLowerCase().startsWith(cleanPrefix));
+  return found || null;
+}
+
 export async function setPointPayload(
   id: string,
   payload: Partial<MemoryPointPayload> & Record<string, any>,
@@ -934,7 +962,7 @@ export async function getDoctorTriageCases(
   const res = await qdrantFetch(scrollUrl, env, {
     method: "POST",
     body: JSON.stringify({
-      limit: 100,
+      limit: 200,
       filter: {
         must: [
           { key: "user_id", match: { value: userId } }
@@ -1025,12 +1053,12 @@ export async function getDoctorTriageCases(
       memory_id: memId,
       target_memory: {
         id: memId,
-        content: targetPayload?.content || "（目标记忆已删除或不存在）",
+        content: targetPayload?.content || "（目标记忆在库中已删除或不存在）",
         type: targetPayload?.type,
         c_h: targetPayload?.ch_prior,
         created_at: targetPayload?.timestamp || targetPayload?.date,
         annotations: targetPayload?.annotations || [],
-        status: targetPayload?.status || "active"
+        status: targetPayload?.status || (targetPoint ? "active" : "deleted")
       },
       concerns: pts.map((x: any) => ({
         id: String(x.id),
@@ -1067,16 +1095,15 @@ export async function updateCaseConcerns(
   await ensureConcernsCollection(env);
   const nowIso = new Date().toISOString();
 
-  // Scroll active concerns matching memory_id & user_id
+  // Scroll active concerns matching user_id
   const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${CONCERNS_COLLECTION}/points/scroll`;
   const res = await qdrantFetch(scrollUrl, env, {
     method: "POST",
     body: JSON.stringify({
-      limit: 50,
+      limit: 200,
       filter: {
         must: [
-          { key: "user_id", match: { value: userId } },
-          { key: "memory_id", match: { value: memoryId } }
+          { key: "user_id", match: { value: userId } }
         ]
       },
       with_payload: true,
@@ -1088,8 +1115,40 @@ export async function updateCaseConcerns(
 
   const data: any = await res.json();
   const concernPoints: any[] = data.result?.points || [];
-  const pointIds = concernPoints.map((p: any) => p.id);
 
+  const cleanMemId = (memoryId || "").trim().toLowerCase();
+  const cleanCaseId = (caseId || "").trim().toUpperCase();
+  const shortCasePrefix = cleanCaseId.startsWith("CASE-") ? cleanCaseId.slice(5).toLowerCase() : cleanCaseId.toLowerCase();
+
+  const matchingPoints = concernPoints.filter((p: any) => {
+    const payload = p.payload || {};
+    // Only update non-resolved concerns
+    if (payload.status === "resolved") return false;
+
+    const pMemId = (payload.memory_id || "").toLowerCase();
+    const pDoctorCaseId = (payload.doctor_case_id || "").toUpperCase();
+    const pId = String(p.id || "").toLowerCase();
+
+    // 1. Direct memory_id exact or prefix match
+    if (cleanMemId && (pMemId === cleanMemId || pMemId.startsWith(cleanMemId) || cleanMemId.startsWith(pMemId))) {
+      return true;
+    }
+    // 2. Direct case_id match or doctor_case_id match
+    if (cleanCaseId && (pDoctorCaseId === cleanCaseId || pId === cleanCaseId.toLowerCase())) {
+      return true;
+    }
+    // 3. Short prefix match (e.g. CASE-8B6E7B9C matches memory_id starting with 8b6e7b9c)
+    if (shortCasePrefix && shortCasePrefix.length >= 4 && (pMemId.startsWith(shortCasePrefix) || shortCasePrefix.startsWith(pMemId.slice(0, 8)))) {
+      return true;
+    }
+    // 4. Point id match
+    if (pId === cleanMemId || pId === cleanCaseId.toLowerCase()) {
+      return true;
+    }
+    return false;
+  });
+
+  const pointIds = matchingPoints.map((p: any) => p.id);
   if (pointIds.length === 0) return 0;
 
   let newStatus: ConcernStatus = "resolved";

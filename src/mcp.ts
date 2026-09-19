@@ -38,6 +38,7 @@ import {
   getTimelinePoints,
   updatePointSpectrum,
   getPointById,
+  findMemoryPointByPrefix,
   setPointPayload,
   scrollNotes,
   parseDateFilter,
@@ -126,8 +127,12 @@ export async function resolveTargetMemoryPoint(
   userId: string,
   env: McpEnv
 ): Promise<{ pointId: string; payload: MemoryPointPayload; isLinkedFromImage?: boolean; imageId?: string } | null> {
-  const cleanId = (targetId || "").trim();
+  let cleanId = (targetId || "").trim();
   if (!cleanId) return null;
+
+  if (cleanId.toUpperCase().startsWith("CASE-")) {
+    cleanId = cleanId.slice(5).trim();
+  }
 
   // 1. If valid UUID, try direct constancy_memories fetch first
   const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(cleanId);
@@ -151,6 +156,17 @@ export async function resolveTargetMemoryPoint(
       isLinkedFromImage: true,
       imageId: resolvedImageId
     };
+  }
+
+  // 4. Try prefix match in constancy_memories for this user (e.g. 8-char hex prefix)
+  if (cleanId.length >= 6 && /^[0-9a-fA-F-]+$/.test(cleanId)) {
+    const prefixMatch = await findMemoryPointByPrefix(cleanId, userId, env);
+    if (prefixMatch && prefixMatch.payload && prefixMatch.payload.user_id === userId) {
+      return {
+        pointId: prefixMatch.id,
+        payload: prefixMatch.payload
+      };
+    }
   }
 
   return null;
@@ -2675,211 +2691,331 @@ export async function executeToolCall(
 
   // 18. Tool: resolve_maintenance_case (🩺 医生专用)
   if (name === "resolve_maintenance_case") {
-    const caseId = (args.case_id || "").trim();
-    const memoryId = (args.memory_id || "").trim();
-    const verdict: DoctorVerdict = args.verdict;
-    const treatment: DoctorTreatment | undefined = args.treatment;
-    const updatedContent = (args.updated_content || "").trim();
-    const doctorNotes = (args.doctor_notes || "").trim();
+    // 1. Normalize caseId and memoryId with polymorphic fallbacks
+    let rawCaseId = (args.case_id || args.caseId || args.id || "").toString().trim();
+    let rawMemoryId = (args.memory_id || args.memoryId || args.target_id || args.target_memory_id || "").toString().trim();
 
-    if (!caseId) throw new Error("Missing required argument: case_id");
-    if (!memoryId) throw new Error("Missing required argument: memory_id");
-    if (!verdict) throw new Error("Missing required argument: verdict (RESOLVED | DEFERRED | ESCALATED_TO_USER)");
-    if (!doctorNotes) throw new Error("Missing required argument: doctor_notes (必须提供病历诊断小结)");
+    if (!rawMemoryId && rawCaseId) {
+      if (rawCaseId.toUpperCase().startsWith("CASE-")) {
+        rawMemoryId = rawCaseId.slice(5).trim();
+      } else {
+        rawMemoryId = rawCaseId;
+      }
+    }
+    if (!rawCaseId && rawMemoryId) {
+      rawCaseId = rawMemoryId.toUpperCase().startsWith("CASE-")
+        ? rawMemoryId.toUpperCase()
+        : `CASE-${rawMemoryId.slice(0, 8).toUpperCase()}`;
+    }
+
+    if (!rawCaseId && !rawMemoryId) {
+      throw new Error("Missing required argument: case_id or memory_id");
+    }
+
+    // 2. Normalize verdict (case-insensitive + synonyms)
+    const rawVerdict = (args.verdict || "").toString().trim().toUpperCase();
+    let verdict: DoctorVerdict;
+    if (rawVerdict === "RESOLVED" || rawVerdict === "CLOSED" || rawVerdict === "FIXED" || rawVerdict === "RESOLVE") {
+      verdict = "RESOLVED";
+    } else if (rawVerdict === "DEFERRED" || rawVerdict === "OBSERVE" || rawVerdict === "WAIT" || rawVerdict === "DEFER") {
+      verdict = "DEFERRED";
+    } else if (rawVerdict === "ESCALATED_TO_USER" || rawVerdict === "ESCALATE" || rawVerdict === "USER" || rawVerdict === "CONSULT") {
+      verdict = "ESCALATED_TO_USER";
+    } else {
+      throw new Error(`Invalid or missing verdict: '${args.verdict}'. Expected RESOLVED | DEFERRED | ESCALATED_TO_USER.`);
+    }
+
+    // 3. Normalize treatment (case-insensitive + synonyms)
+    const rawTreatment = (args.treatment || "").toString().trim().toUpperCase();
+    let treatment: DoctorTreatment | undefined = undefined;
+    if (rawTreatment === "KEEP" || rawTreatment === "MAINTAIN" || rawTreatment === "VALID") {
+      treatment = "KEEP";
+    } else if (rawTreatment === "UPDATE" || rawTreatment === "MODIFY" || rawTreatment === "CORRECT" || rawTreatment === "EDIT") {
+      treatment = "UPDATE";
+    } else if (rawTreatment === "EXPIRE" || rawTreatment === "DELETE" || rawTreatment === "RETIRE" || rawTreatment === "ARCHIVE") {
+      treatment = "EXPIRE";
+    } else if (rawTreatment === "MERGE" || rawTreatment === "COMBINE" || rawTreatment === "DEDUPLICATE") {
+      treatment = "MERGE";
+    }
+
+    // 4. Elastic content and doctor notes extraction
+    const updatedContent = (
+      args.updated_content ||
+      args.updatedContent ||
+      args.content ||
+      args.new_content ||
+      args.revised_content ||
+      args.treatment_content ||
+      args.correction ||
+      ""
+    ).toString().trim();
+
+    const doctorNotes = (
+      args.doctor_notes ||
+      args.doctorNotes ||
+      args.notes ||
+      args.reason ||
+      args.summary ||
+      args.comment ||
+      "处方已执行留档"
+    ).toString().trim();
 
     if (verdict === "RESOLVED" && !treatment) {
-      throw new Error("当 verdict 为 RESOLVED 时，必须明确指定 treatment (KEEP | UPDATE | EXPIRE | MERGE)");
+      if (updatedContent) {
+        treatment = "UPDATE";
+      } else if (/失效|删除|废弃|退役|下线|清理|过期|垃圾/i.test(doctorNotes)) {
+        treatment = "EXPIRE";
+      } else {
+        treatment = "KEEP";
+      }
     }
+
     if (verdict === "RESOLVED" && treatment === "UPDATE" && !updatedContent) {
       throw new Error("当 treatment 为 UPDATE 时，必须提供 updated_content (修正后的精确记忆文本)");
     }
 
-    const targetPoint = await getPointById(memoryId, env);
-    if (!targetPoint || !targetPoint.payload) {
-      throw new Error(`目标记忆点 '${memoryId}' 未找到。`);
-    }
-    const oldPayload = targetPoint.payload;
-    const nowIso = new Date().toISOString();
-    const nowMs = Date.now();
+    // 5. Target memory resolution
+    let targetPoint = await resolveTargetMemoryPoint(rawMemoryId, userId, env);
+    let memoryId = targetPoint ? targetPoint.pointId : rawMemoryId;
 
-    let actionDetails = "";
-
-    // 1. Execute prescription on target memory in constancy_memories
-    if (verdict === "RESOLVED") {
-      if (treatment === "UPDATE") {
-        // Create Superseded Lineage:
-        // a. Old memory marks expired + superseded_by newId + appends annotation
-        const newMemoryId = crypto.randomUUID();
-        const annotation: MemoryAnnotation = {
-          id: crypto.randomUUID(),
-          timestamp: nowIso,
-          kind: "correction",
-          text: `【🩺 医生临床处方】${doctorNotes}（后继世代: ${newMemoryId}）`,
-          source: "model_inferred"
-        };
-        const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
-        currentAnnotations.push(annotation);
-
-        await setPointPayload(memoryId, {
-          status: "expired",
-          retired: true,
-          retired_at: nowIso,
-          retired_reason: `[医生更新] ${doctorNotes}`,
-          superseded_by: newMemoryId,
-          annotations: currentAnnotations,
-          t_last_update: nowMs
-        }, env);
-
-        // b. Insert new memory point with predecessor link
-        const newVector = await getEmbedding(updatedContent, env, "document");
-        const initialH = injectIntent(new Array(7).fill(0), 1.0);
-        const newPayload: MemoryPointPayload = {
-          user_id: oldPayload.user_id,
-          content: updatedContent,
-          timestamp: nowIso,
-          date: nowIso.slice(0, 10),
-          type: oldPayload.type || "insight",
-          entities: oldPayload.entities || [],
-          tags: oldPayload.tags || [],
-          source: "model_inferred",
-          ch_prior: oldPayload.ch_prior || 9.0,
-          h_spectrum: initialH,
-          t_last_update: nowMs,
-          t_last_strong: nowMs,
-          status: "active",
-          predecessor: memoryId
-        };
-        await upsertMemoryPoint(newMemoryId, newVector, newPayload, env);
-        actionDetails = `已将旧记忆标记退役（指向后继 ${newMemoryId}），并成功写入世代更迭后的健康记忆。`;
-
-      } else if (treatment === "EXPIRE") {
-        const annotation: MemoryAnnotation = {
-          id: crypto.randomUUID(),
-          timestamp: nowIso,
-          kind: "correction",
-          text: `【🩺 医生临床处方】标记失效：${doctorNotes}`,
-          source: "model_inferred"
-        };
-        const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
-        currentAnnotations.push(annotation);
-
-        await setPointPayload(memoryId, {
-          status: "expired",
-          retired: true,
-          retired_at: nowIso,
-          retired_reason: doctorNotes,
-          annotations: currentAnnotations,
-          t_last_update: nowMs
-        }, env);
-        actionDetails = `已对该病灶记忆标记失效 (status: expired)，退出活跃检索队列。`;
-
-      } else if (treatment === "KEEP") {
-        const annotation: MemoryAnnotation = {
-          id: crypto.randomUUID(),
-          timestamp: nowIso,
-          kind: "context",
-          text: `【🩺 医生巡诊确认】复核健康，维持原状：${doctorNotes}`,
-          source: "model_inferred"
-        };
-        const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
-        currentAnnotations.push(annotation);
-
-        await setPointPayload(memoryId, {
-          status: "active",
-          suspicion_count: 0,
-          annotations: currentAnnotations,
-          t_last_update: nowMs
-        }, env);
-        actionDetails = `复核确认记忆准确健康，清空存疑计数，维持原状。`;
-
-      } else if (treatment === "MERGE") {
-        const mergeWithIds: string[] = Array.isArray(args.merge_with_ids) ? args.merge_with_ids : [];
-        let retiredCount = 0;
-        for (const mId of mergeWithIds) {
-          if (!mId || mId === memoryId) continue;
-          const mPoint = await getPointById(mId, env);
-          if (mPoint && mPoint.payload) {
-            const mAnnotations = Array.isArray(mPoint.payload.annotations) ? [...mPoint.payload.annotations] : [];
-            mAnnotations.push({
-              id: crypto.randomUUID(),
-              timestamp: nowIso,
-              kind: "correction",
-              text: `【🩺 医生临床处方】归并退役：已合并入主记忆 [${memoryId}]。理由: ${doctorNotes}`,
-              source: "model_inferred"
-            });
-            await setPointPayload(mId, {
-              status: "expired",
-              retired: true,
-              retired_at: nowIso,
-              retired_reason: `归并入主记忆 [${memoryId}]`,
-              superseded_by: memoryId,
-              annotations: mAnnotations,
-              t_last_update: nowMs
-            }, env);
-            retiredCount++;
+    // Direct UUID fallback
+    if (!targetPoint) {
+      const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(rawMemoryId);
+      if (isUuid) {
+        const direct = await getPointById(rawMemoryId, env);
+        if (direct && direct.payload) {
+          if (direct.payload.user_id === userId) {
+            targetPoint = { pointId: rawMemoryId, payload: direct.payload };
+            memoryId = rawMemoryId;
+          } else {
+            throw new Error("权限校验失败：您无权修改其他用户的记忆点。");
           }
         }
+      }
+    }
 
-        let newContent = oldPayload.content;
-        if (updatedContent) {
-          newContent = updatedContent;
+    const nowIso = new Date().toISOString();
+    const nowMs = Date.now();
+    let actionDetails = "";
+
+    // 6. Handle target memory update / recreation / phantom handling
+    if (!targetPoint || !targetPoint.payload) {
+      // Memory point does not exist in constancy_memories (already deleted/purged)
+      if (verdict === "RESOLVED") {
+        if (treatment === "UPDATE" && updatedContent) {
+          const newMemoryId = crypto.randomUUID();
           const newVector = await getEmbedding(updatedContent, env, "document");
-          await upsertMemoryPoint(memoryId, newVector, {
-            ...oldPayload,
-            content: newContent,
-            status: "active",
-            suspicion_count: 0,
+          const initialH = injectIntent(new Array(7).fill(0), 1.0);
+          const newPayload: MemoryPointPayload = {
+            user_id: userId,
+            content: updatedContent,
+            timestamp: nowIso,
+            date: nowIso.slice(0, 10),
+            type: "insight",
+            entities: [],
+            tags: [],
+            source: "model_inferred",
+            ch_prior: 9.0,
+            h_spectrum: initialH,
+            t_last_update: nowMs,
+            t_last_strong: nowMs,
+            status: "active"
+          };
+          await upsertMemoryPoint(newMemoryId, newVector, newPayload, env);
+          actionDetails = `原目标记忆点在库中不存在或已被清理，已为您直接重新录入健康记忆 [${newMemoryId}]。`;
+        } else {
+          actionDetails = `目标记忆在库中已不存在或已下线，已自动完成对应案卷与顾虑的销案归档。`;
+        }
+      } else if (verdict === "DEFERRED") {
+        actionDetails = `目标记忆在库中未找到，案卷已标记留观。`;
+      } else if (verdict === "ESCALATED_TO_USER") {
+        actionDetails = `目标记忆在库中未找到，案卷已转交用户裁决。`;
+      }
+    } else {
+      // Target memory exists
+      const oldPayload = targetPoint.payload;
+      if (oldPayload.user_id && oldPayload.user_id !== userId) {
+        throw new Error("权限校验失败：您无权修改其他用户的记忆点。");
+      }
+
+      if (verdict === "RESOLVED") {
+        if (treatment === "UPDATE") {
+          // Create Superseded Lineage:
+          // a. Old memory marks expired + superseded_by newId + appends annotation
+          const newMemoryId = crypto.randomUUID();
+          const annotation: MemoryAnnotation = {
+            id: crypto.randomUUID(),
+            timestamp: nowIso,
+            kind: "correction",
+            text: `【🩺 医生临床处方】${doctorNotes}（后继世代: ${newMemoryId}）`,
+            source: "model_inferred"
+          };
+          const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
+          currentAnnotations.push(annotation);
+
+          await setPointPayload(memoryId, {
+            status: "expired",
+            retired: true,
+            retired_at: nowIso,
+            retired_reason: `[医生更新] ${doctorNotes}`,
+            superseded_by: newMemoryId,
+            annotations: currentAnnotations,
             t_last_update: nowMs
           }, env);
-        } else {
+
+          // b. Insert new memory point with predecessor link
+          const newVector = await getEmbedding(updatedContent, env, "document");
+          const initialH = injectIntent(new Array(7).fill(0), 1.0);
+          const newPayload: MemoryPointPayload = {
+            user_id: oldPayload.user_id || userId,
+            content: updatedContent,
+            timestamp: nowIso,
+            date: nowIso.slice(0, 10),
+            type: oldPayload.type || "insight",
+            entities: oldPayload.entities || [],
+            tags: oldPayload.tags || [],
+            source: "model_inferred",
+            ch_prior: oldPayload.ch_prior || 9.0,
+            h_spectrum: initialH,
+            t_last_update: nowMs,
+            t_last_strong: nowMs,
+            status: "active",
+            predecessor: memoryId
+          };
+          await upsertMemoryPoint(newMemoryId, newVector, newPayload, env);
+          actionDetails = `已将旧记忆标记退役（指向后继 ${newMemoryId}），并成功写入世代更迭后的健康记忆。`;
+
+        } else if (treatment === "EXPIRE") {
+          const annotation: MemoryAnnotation = {
+            id: crypto.randomUUID(),
+            timestamp: nowIso,
+            kind: "correction",
+            text: `【🩺 医生临床处方】标记失效：${doctorNotes}`,
+            source: "model_inferred"
+          };
+          const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
+          currentAnnotations.push(annotation);
+
+          await setPointPayload(memoryId, {
+            status: "expired",
+            retired: true,
+            retired_at: nowIso,
+            retired_reason: doctorNotes,
+            annotations: currentAnnotations,
+            t_last_update: nowMs
+          }, env);
+          actionDetails = `已对该病灶记忆标记失效 (status: expired)，退出活跃检索队列。`;
+
+        } else if (treatment === "KEEP") {
+          const annotation: MemoryAnnotation = {
+            id: crypto.randomUUID(),
+            timestamp: nowIso,
+            kind: "context",
+            text: `【🩺 医生巡诊确认】复核健康，维持原状：${doctorNotes}`,
+            source: "model_inferred"
+          };
+          const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
+          currentAnnotations.push(annotation);
+
           await setPointPayload(memoryId, {
             status: "active",
             suspicion_count: 0,
+            annotations: currentAnnotations,
             t_last_update: nowMs
           }, env);
+          actionDetails = `复核确认记忆准确健康，清空存疑计数，维持原状。`;
+
+        } else if (treatment === "MERGE") {
+          const mergeWithIds: string[] = Array.isArray(args.merge_with_ids) ? args.merge_with_ids : [];
+          let retiredCount = 0;
+          for (const mId of mergeWithIds) {
+            if (!mId || mId === memoryId) continue;
+            const resolvedM = await resolveTargetMemoryPoint(mId, userId, env);
+            const actualMId = resolvedM ? resolvedM.pointId : mId;
+            const mPoint = await getPointById(actualMId, env);
+            if (mPoint && mPoint.payload && (!mPoint.payload.user_id || mPoint.payload.user_id === userId)) {
+              const mAnnotations = Array.isArray(mPoint.payload.annotations) ? [...mPoint.payload.annotations] : [];
+              mAnnotations.push({
+                id: crypto.randomUUID(),
+                timestamp: nowIso,
+                kind: "correction",
+                text: `【🩺 医生临床处方】归并退役：已合并入主记忆 [${memoryId}]。理由: ${doctorNotes}`,
+                source: "model_inferred"
+              });
+              await setPointPayload(actualMId, {
+                status: "expired",
+                retired: true,
+                retired_at: nowIso,
+                retired_reason: `归并入主记忆 [${memoryId}]`,
+                superseded_by: memoryId,
+                annotations: mAnnotations,
+                t_last_update: nowMs
+              }, env);
+              retiredCount++;
+            }
+          }
+
+          let newContent = oldPayload.content;
+          if (updatedContent) {
+            newContent = updatedContent;
+            const newVector = await getEmbedding(updatedContent, env, "document");
+            await upsertMemoryPoint(memoryId, newVector, {
+              ...oldPayload,
+              content: newContent,
+              status: "active",
+              suspicion_count: 0,
+              t_last_update: nowMs
+            }, env);
+          } else {
+            await setPointPayload(memoryId, {
+              status: "active",
+              suspicion_count: 0,
+              t_last_update: nowMs
+            }, env);
+          }
+
+          const annotation: MemoryAnnotation = {
+            id: crypto.randomUUID(),
+            timestamp: nowIso,
+            kind: "context",
+            text: `【🩺 医生临床处方】归并精简：已合并吸收 ${retiredCount} 条同构碎片。理由: ${doctorNotes}`,
+            source: "model_inferred"
+          };
+          await appendMemoryAnnotation(memoryId, annotation, env);
+
+          actionDetails = `已成功将 ${retiredCount} 条同构碎片归并至主记忆 [${memoryId}]，消除认知冗余与重复。`;
         }
-
-        const annotation: MemoryAnnotation = {
-          id: crypto.randomUUID(),
-          timestamp: nowIso,
-          kind: "context",
-          text: `【🩺 医生临床处方】归并精简：已合并吸收 ${retiredCount} 条同构碎片。理由: ${doctorNotes}`,
-          source: "model_inferred"
-        };
-        await appendMemoryAnnotation(memoryId, annotation, env);
-
-        actionDetails = `已成功将 ${retiredCount} 条同构碎片归并至主记忆 [${memoryId}]，消除认知冗余与重复。`;
+      } else if (verdict === "DEFERRED") {
+        const deferCount = (oldPayload.defer_count || 0) + 1;
+        const suspicionCount = (oldPayload.suspicion_count || 0) + 1;
+        await setPointPayload(memoryId, {
+          defer_count: deferCount,
+          suspicion_count: suspicionCount,
+          t_last_update: nowMs
+        }, env);
+        actionDetails = `证据不足，已登记留观跟踪 (累计留观 ${deferCount} 次)，避免草率动刀。`;
+      } else if (verdict === "ESCALATED_TO_USER") {
+        await setPointPayload(memoryId, {
+          pending_user_confirmation: true,
+          t_last_update: nowMs
+        }, env);
+        actionDetails = `案情重大且存疑，已将案卷转送至后花园控制台，等待用户主权裁决。`;
       }
-    } else if (verdict === "DEFERRED") {
-      const deferCount = (oldPayload.defer_count || 0) + 1;
-      const suspicionCount = (oldPayload.suspicion_count || 0) + 1;
-      await setPointPayload(memoryId, {
-        defer_count: deferCount,
-        suspicion_count: suspicionCount,
-        t_last_update: nowMs
-      }, env);
-      actionDetails = `证据不足，已登记留观跟踪 (累计留观 ${deferCount} 次)，避免草率动刀。`;
-    } else if (verdict === "ESCALATED_TO_USER") {
-      await setPointPayload(memoryId, {
-        pending_user_confirmation: true,
-        t_last_update: nowMs
-      }, env);
-      actionDetails = `案情重大且存疑，已将案卷转送至后花园控制台，等待用户主权裁决。`;
     }
 
-    // 2. Update Qdrant concerns collection
-    const updatedCount = await updateCaseConcerns(userId, memoryId, caseId, verdict, treatment, doctorNotes, env);
+    // 7. Update Qdrant concerns collection
+    const updatedCount = await updateCaseConcerns(userId, memoryId, rawCaseId, verdict, treatment, doctorNotes, env);
 
     return {
       success: true,
-      case_id: caseId,
+      case_id: rawCaseId,
       memory_id: memoryId,
       verdict,
       treatment: treatment || null,
       concerns_closed: updatedCount,
       action_details: actionDetails,
       doctor_notes: doctorNotes,
-      message: `🩺 案卷 ${caseId} 临床处方已成功下达并留档执行。`
+      message: `🩺 案卷 ${rawCaseId} 临床处方已成功下达并留档执行。`
     };
   }
 
