@@ -185,6 +185,11 @@ export interface EvaluatedMemory {
   mime_type?: string;
   sha256?: string;
   revisions_count?: number;
+
+  // Optional Entity Fields
+  entity_name?: string;
+  aliases?: string[];
+  relations?: string[];
 }
 
 export function getSourceBadge(source?: MemorySourceType): string {

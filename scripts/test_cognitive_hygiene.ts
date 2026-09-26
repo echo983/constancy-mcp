@@ -189,6 +189,16 @@ async function run() {
     if (newMem.payload?.status !== "active") {
       throw new Error(`Expected new memory status to be active, got ${newMem.payload?.status}`);
     }
+    if (newMem.payload?.source !== "user_stated") {
+      throw new Error(`Expected new memory source to inherit 'user_stated', got ${newMem.payload?.source}`);
+    }
+    if (!Array.isArray(newMem.payload?.h_spectrum) || newMem.payload.h_spectrum.length !== 7) {
+      throw new Error("Expected 7-dim h_spectrum in new generation");
+    }
+    if (!Array.isArray(newMem.payload?.revisions) || newMem.payload.revisions.length !== 1) {
+      throw new Error(`Expected 1 revision in new generation, got ${newMem.payload?.revisions?.length}`);
+    }
+    console.log(`✅ Successor inherited source: ${newMem.payload?.source}, revisions count: ${newMem.payload?.revisions?.length}`);
     console.log("✅ New memory successfully generated with predecessor lineage!");
 
     // -------------------------------------------------------------
@@ -530,7 +540,123 @@ async function run() {
     pointsToDelete.push(memElasticAfter.payload.superseded_by);
     console.log("✅ Elastic parameter resilience successfully verified!");
 
-    console.log("\n🎉 ALL 16 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
+    // -------------------------------------------------------------
+    // Test 17: Entity Lineage, Epistemic Source & Thermal Spectrum Inheritance
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 17] Entity Lineage, Epistemic Source & Thermal Spectrum Inheritance ---");
+    const testEntName = `LineageTestEntity_${Date.now()}`;
+    const entCreateRes = await executeToolCall("upsert_entity", {
+      name: testEntName,
+      description: "初始实体定义：前沿认知记忆架构设计者",
+      aliases: ["EntArch", "架构师"],
+      relations: ["Constancy MCP"],
+      source: "user_stated"
+    }, testUserId, env);
+
+    if (!entCreateRes.success) throw new Error("Failed to create initial entity");
+    const entPointId = entCreateRes.point_id;
+    pointsToDelete.push(entPointId);
+
+    const entPointInitial = await getPointById(entPointId, env);
+    const initialH0 = entPointInitial.payload?.h_spectrum?.[0] || 0;
+    console.log(`Initial entity spectrum[0]: ${initialH0}, source: ${entPointInitial.payload?.source}`);
+    if (entPointInitial.payload?.source !== "user_stated") {
+      throw new Error(`Expected initial entity source to be user_stated, got ${entPointInitial.payload?.source}`);
+    }
+
+    // Upsert update entity: modify description, aliases and relations
+    const entUpdateRes = await executeToolCall("upsert_entity", {
+      name: testEntName,
+      description: "更新实体定义：前沿认知记忆架构设计者兼终身记忆动力学奠基人",
+      aliases: ["EntArch", "架构师", "总师"],
+      relations: ["Constancy MCP", "ACTD v1.0"]
+    }, testUserId, env);
+
+    if (!entUpdateRes.success || !entUpdateRes.updated) throw new Error("Expected entity upsert update to succeed");
+    const entPointUpdated = await getPointById(entPointId, env);
+    const updatedH0 = entPointUpdated.payload?.h_spectrum?.[0] || 0;
+    console.log(`Updated entity spectrum[0]: ${updatedH0}, source: ${entPointUpdated.payload?.source}`);
+    
+    // Assert thermal spectrum accumulated energy (not reset to 0 or initial)
+    if (updatedH0 <= initialH0) {
+      throw new Error(`Expected updated spectrum[0] (${updatedH0}) to accumulate beyond initial (${initialH0})`);
+    }
+    // Assert source inherited
+    if (entPointUpdated.payload?.source !== "user_stated") {
+      throw new Error(`Expected updated entity source to remain 'user_stated', got ${entPointUpdated.payload?.source}`);
+    }
+    // Assert revisions preserved
+    if (!Array.isArray(entPointUpdated.payload?.revisions) || entPointUpdated.payload.revisions.length !== 1) {
+      throw new Error(`Expected 1 revision snapshot in entity update, got ${entPointUpdated.payload?.revisions?.length}`);
+    }
+
+    // Now submit concern and resolve via doctor UPDATE on this entity
+    await executeToolCall("submit_concern", {
+      memory_id: entPointId,
+      reason: "实体百科需要吸收最新权威履历",
+      evidence: "用户原话：把我的研究方向明确加上 Anthropocentric Dynamics",
+      severity: "high"
+    }, testUserId, env);
+
+    const docEntRes = await executeToolCall("resolve_maintenance_case", {
+      case_id: `CASE-${entPointId.slice(0, 8).toUpperCase()}`,
+      memory_id: entPointId,
+      verdict: "RESOLVED",
+      treatment: "UPDATE",
+      updated_content: `【核心实体: ${testEntName}】\n前沿认知记忆架构设计者，专注 Anthropocentric Dynamics 理论与工程实践\n(别名: EntArch, 架构师, 总师)\n(关联实体: Constancy MCP, ACTD v1.0)`,
+      doctor_notes: "根据最新研究方向确立完整实体百科"
+    }, testUserId, env);
+
+    if (!docEntRes.success) throw new Error("Expected doctor resolution on entity to succeed");
+    const entAfterDoctor = await getPointById(entPointId, env);
+    const entSuccessorId = entAfterDoctor.payload?.superseded_by;
+    if (!entSuccessorId) throw new Error("Expected doctor update to create superseded_by on entity");
+    pointsToDelete.push(entSuccessorId);
+
+    const entSuccessor = await getPointById(entSuccessorId, env);
+    console.log("Doctor successor entity payload:", {
+      type: entSuccessor.payload?.type,
+      entity_name: entSuccessor.payload?.entity_name,
+      aliases: entSuccessor.payload?.aliases,
+      relations: entSuccessor.payload?.relations,
+      source: entSuccessor.payload?.source,
+      ch_prior: entSuccessor.payload?.ch_prior,
+      predecessor: entSuccessor.payload?.predecessor,
+      revisions_count: entSuccessor.payload?.revisions?.length,
+      spectrum0: entSuccessor.payload?.h_spectrum?.[0]
+    });
+
+    // Assert BUG-1: thermal spectrum energy inherited
+    if (!Array.isArray(entSuccessor.payload?.h_spectrum) || entSuccessor.payload.h_spectrum[0] <= 1.0) {
+      throw new Error(`Expected inherited h_spectrum on successor, got ${entSuccessor.payload?.h_spectrum?.[0]}`);
+    }
+    // Assert BUG-2: epistemic source preserved as 'user_stated'
+    if (entSuccessor.payload?.source !== "user_stated") {
+      throw new Error(`Expected successor source to be 'user_stated', got ${entSuccessor.payload?.source}`);
+    }
+    // Assert BUG-3: entity_name, aliases, relations, revisions inherited
+    if (entSuccessor.payload?.type !== "entity") {
+      throw new Error(`Expected type to be 'entity', got ${entSuccessor.payload?.type}`);
+    }
+    if (entSuccessor.payload?.entity_name !== testEntName) {
+      throw new Error(`Expected entity_name to be '${testEntName}', got ${entSuccessor.payload?.entity_name}`);
+    }
+    if (!Array.isArray(entSuccessor.payload?.aliases) || !entSuccessor.payload.aliases.includes("总师")) {
+      throw new Error("Expected aliases to be preserved on entity successor");
+    }
+    if (!Array.isArray(entSuccessor.payload?.relations) || !entSuccessor.payload.relations.includes("ACTD v1.0")) {
+      throw new Error("Expected relations to be preserved on entity successor");
+    }
+    if (!Array.isArray(entSuccessor.payload?.revisions) || entSuccessor.payload.revisions.length < 2) {
+      throw new Error(`Expected at least 2 revisions on entity successor, got ${entSuccessor.payload?.revisions?.length}`);
+    }
+    if (entSuccessor.payload?.predecessor !== entPointId) {
+      throw new Error(`Expected predecessor to be ${entPointId}, got ${entSuccessor.payload?.predecessor}`);
+    }
+
+    console.log("✅ Entity lineage, epistemic source & thermal spectrum inheritance verified with 100% precision!");
+
+    console.log("\n🎉 ALL 17 INTEGRATION TESTS PASSED WITH 100% SUCCESS!");
 
   } finally {
     // -------------------------------------------------------------

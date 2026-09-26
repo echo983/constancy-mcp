@@ -373,6 +373,11 @@ export const MCP_TOOLS = [
           type: "array",
           items: { type: "string" },
           description: "【关联的独立实体】本实体所依赖、关联或衍生的其他独立实体名称（例如 ['ACTD v1.0', 'Voyage AI', 'Qdrant', 'Cloudflare Images']）"
+        },
+        source: {
+          type: "string",
+          enum: ["user_stated", "model_suggested", "model_inferred", "external"],
+          description: "认知来源属性（可选。'user_stated'=用户直陈，默认；'model_inferred'=模型推断；'external'=外部输入。更新既有实体时若不传则自动继承原版本来源）"
         }
       },
       required: ["name", "description"]
@@ -926,6 +931,10 @@ export async function executeToolCall(
           predecessor: p.predecessor,
           pending_user_confirmation: Boolean(p.pending_user_confirmation),
           title: p.title || undefined,
+          entity_name: p.entity_name || undefined,
+          aliases: p.aliases || undefined,
+          relations: p.relations || undefined,
+          revisions_count: Array.isArray(p.revisions) ? p.revisions.length : 0,
           image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
           base64_length: p.base64 ? p.base64.length : undefined,
@@ -978,6 +987,10 @@ export async function executeToolCall(
           predecessor: p.predecessor,
           pending_user_confirmation: Boolean(p.pending_user_confirmation),
           title: p.title || undefined,
+          entity_name: p.entity_name || undefined,
+          aliases: p.aliases || undefined,
+          relations: p.relations || undefined,
+          revisions_count: Array.isArray(p.revisions) ? p.revisions.length : 0,
           image_id: p.image_id || extractAssociatedImageId(p) || undefined,
           has_base64: Boolean(p.base64),
           base64_length: p.base64 ? p.base64.length : undefined,
@@ -1358,8 +1371,13 @@ export async function executeToolCall(
     }
 
     // Entities inherently enjoy foundation constancy (C_H >= 11.5)
-    const chPrior = 11.5;
+    let chPrior = 11.5;
     const initialSpectrum = injectIntent(new Array(7).fill(1.5), 1.0);
+    let entitySpectrum = initialSpectrum;
+    let entitySource: MemorySourceType = (args.source && ["user_stated", "model_suggested", "model_inferred", "external"].includes(args.source))
+      ? args.source
+      : "user_stated";
+    let tLastStrong = nowMs;
 
     // Idempotent upsert: check if entity already exists for this user
     const existingPoints = await findEntityPoints(entityName, userId, env);
@@ -1377,6 +1395,20 @@ export async function executeToolCall(
       if (oldPayload) {
         originalCreatedAt = oldPayload.created_at || oldPayload.timestamp || originalCreatedAt;
         existingRevisions = Array.isArray(oldPayload.revisions) ? [...oldPayload.revisions] : [];
+        if (!args.source && oldPayload.source) {
+          entitySource = oldPayload.source;
+        }
+        if (typeof oldPayload.ch_prior === "number") {
+          chPrior = Math.max(11.5, oldPayload.ch_prior);
+        }
+
+        // Inherit & decay thermal spectrum from prior generation, then inject active intent
+        const baseH = (Array.isArray(oldPayload.h_spectrum) && oldPayload.h_spectrum.length === 7)
+          ? oldPayload.h_spectrum
+          : new Array(7).fill(1.5);
+        const decayedH = decaySpectrum(baseH, oldPayload.t_last_update || nowMs, nowMs);
+        entitySpectrum = injectIntent(decayedH, 1.0);
+        tLastStrong = nowMs;
 
         // 若内容、别名或关联发生变化，将旧版本压入 revisions 审计链留痕
         if (oldPayload.content !== fullContent) {
@@ -1419,10 +1451,11 @@ export async function executeToolCall(
       relations: relations,
       entities: [entityName, ...aliases], // 严格限定为实体名与真正同义词，杜绝 relations 污染 entities
       tags: ["entity_registry", "core_knowledge"],
+      source: entitySource,
       ch_prior: chPrior,
-      h_spectrum: initialSpectrum,
+      h_spectrum: entitySpectrum,
       t_last_update: nowMs,
-      t_last_strong: nowMs,
+      t_last_strong: tLastStrong,
       revisions: existingRevisions.length > 0 ? existingRevisions : undefined
     };
 
@@ -1435,10 +1468,11 @@ export async function executeToolCall(
       point_id: pointId,
       updated: isUpdate,
       c_h: chPrior,
+      source: entitySource,
       revisions_count: existingRevisions.length,
       retired_duplicates_count: existingPoints.length > 1 ? existingPoints.length - 1 : 0,
       message: isUpdate
-        ? `🏛️ 已成功更新实体 '${entityName}' 的百科条目（常度: 11.5，百年基石级，已记录版本审计快照${existingPoints.length > 1 ? `，已软归档 ${existingPoints.length - 1} 条历史重复条目` : ""}）`
+        ? `🏛️ 已成功更新实体 '${entityName}' 的百科条目（常度: ${chPrior}，百年基石级，已继承热度谱与认知来源 [${entitySource}]，已记录版本审计快照${existingPoints.length > 1 ? `，已软归档 ${existingPoints.length - 1} 条历史重复条目` : ""}）`
         : `🏛️ 已成功将实体 '${entityName}' 固化至核心实体百科清单 (常度: 11.5，百年基石级)`
     };
   }
@@ -1747,6 +1781,8 @@ export async function executeToolCall(
       newCh = args.c_h;
     }
 
+    const prevUpdateMs = p.t_last_update || nowMs;
+
     // Update payload object
     p.content = newContent;
     p.title = newTitle;
@@ -1760,7 +1796,7 @@ export async function executeToolCall(
 
     if (contentChanged || titleChanged) {
       // Re-inject intent energy
-      const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
+      const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), prevUpdateMs, nowMs);
       p.h_spectrum = injectIntent(decayedH, 1.0);
       p.t_last_strong = nowMs;
 
@@ -2797,6 +2833,7 @@ export async function executeToolCall(
     const nowIso = new Date().toISOString();
     const nowMs = Date.now();
     let actionDetails = "";
+    let resultingNewMemoryId: string | undefined = undefined;
 
     // 6. Handle target memory update / recreation / phantom handling
     if (!targetPoint || !targetPoint.payload) {
@@ -2804,6 +2841,7 @@ export async function executeToolCall(
       if (verdict === "RESOLVED") {
         if (treatment === "UPDATE" && updatedContent) {
           const newMemoryId = crypto.randomUUID();
+          resultingNewMemoryId = newMemoryId;
           const newVector = await getEmbedding(updatedContent, env, "document");
           const initialH = injectIntent(new Array(7).fill(0), 1.0);
           const newPayload: MemoryPointPayload = {
@@ -2843,6 +2881,7 @@ export async function executeToolCall(
           // Create Superseded Lineage:
           // a. Old memory marks expired + superseded_by newId + appends annotation
           const newMemoryId = crypto.randomUUID();
+          resultingNewMemoryId = newMemoryId;
           const annotation: MemoryAnnotation = {
             id: crypto.randomUUID(),
             timestamp: nowIso,
@@ -2863,27 +2902,66 @@ export async function executeToolCall(
             t_last_update: nowMs
           }, env);
 
-          // b. Insert new memory point with predecessor link
+          // b. Insert new memory point with predecessor link and lineage inheritance
           const newVector = await getEmbedding(updatedContent, env, "document");
-          const initialH = injectIntent(new Array(7).fill(0), 1.0);
+
+          // 1. Inherit thermal spectrum with decay & intent injection (BUG-1 fix)
+          const baseH = (Array.isArray(oldPayload.h_spectrum) && oldPayload.h_spectrum.length === 7)
+            ? oldPayload.h_spectrum
+            : (oldPayload.type === "entity" ? new Array(7).fill(1.5) : new Array(7).fill(0));
+          const decayedH = decaySpectrum(baseH, oldPayload.t_last_update || nowMs, nowMs);
+          const nextH = injectIntent(decayedH, 1.0);
+
+          // 2. Revisions audit trail preservation (BUG-3 fix)
+          const revisions: NoteRevision[] = Array.isArray(oldPayload.revisions) ? [...oldPayload.revisions] : [];
+          if (oldPayload.content !== updatedContent) {
+            revisions.unshift({
+              timestamp: nowIso,
+              content: oldPayload.content,
+              title: oldPayload.title,
+              entity_name: oldPayload.entity_name,
+              aliases: oldPayload.aliases,
+              relations: oldPayload.relations,
+              tags: oldPayload.tags,
+              reason: `[医生更新] ${doctorNotes}`
+            });
+            if (revisions.length > 5) {
+              revisions.length = 5;
+            }
+          }
+
+          // 3. Epistemic provenance preservation (BUG-2 fix)
+          const inheritedSource: MemorySourceType = oldPayload.source || "user_stated";
+
           const newPayload: MemoryPointPayload = {
             user_id: oldPayload.user_id || userId,
             content: updatedContent,
+            title: oldPayload.title,
             timestamp: nowIso,
+            created_at: oldPayload.created_at || oldPayload.timestamp || nowIso,
+            updated_at: nowIso,
             date: nowIso.slice(0, 10),
             type: oldPayload.type || "insight",
-            entities: oldPayload.entities || [],
+            entity_name: oldPayload.entity_name || undefined,
+            aliases: oldPayload.aliases || undefined,
+            relations: oldPayload.relations || undefined,
+            entities: (oldPayload.entities && oldPayload.entities.length > 0)
+              ? oldPayload.entities
+              : (oldPayload.entity_name ? [oldPayload.entity_name, ...(oldPayload.aliases || [])] : []),
             tags: oldPayload.tags || [],
-            source: "model_inferred",
-            ch_prior: oldPayload.ch_prior || 9.0,
-            h_spectrum: initialH,
+            source: inheritedSource,
+            ch_prior: oldPayload.ch_prior ?? (oldPayload.type === "entity" ? 11.5 : 9.0),
+            h_spectrum: nextH,
             t_last_update: nowMs,
             t_last_strong: nowMs,
             status: "active",
-            predecessor: memoryId
+            predecessor: memoryId,
+            image_id: oldPayload.image_id || undefined,
+            location: oldPayload.location || undefined,
+            revisions: revisions.length > 0 ? revisions : undefined
           };
           await upsertMemoryPoint(newMemoryId, newVector, newPayload, env);
-          actionDetails = `已将旧记忆标记退役（指向后继 ${newMemoryId}），并成功写入世代更迭后的健康记忆。`;
+          actionDetails = `已将旧记忆标记退役（指向后继 ${newMemoryId}），并成功写入世代更迭后的健康记忆（继承常度与热度谱，保留来源标签 [${inheritedSource}]）。`;
 
         } else if (treatment === "EXPIRE") {
           const annotation: MemoryAnnotation = {
@@ -2956,21 +3034,49 @@ export async function executeToolCall(
           }
 
           let newContent = oldPayload.content;
+          const baseH = (Array.isArray(oldPayload.h_spectrum) && oldPayload.h_spectrum.length === 7)
+            ? oldPayload.h_spectrum
+            : (oldPayload.type === "entity" ? new Array(7).fill(1.5) : new Array(7).fill(0));
+          const decayedH = decaySpectrum(baseH, oldPayload.t_last_update || nowMs, nowMs);
+
           if (updatedContent) {
             newContent = updatedContent;
             const newVector = await getEmbedding(updatedContent, env, "document");
+            const nextH = injectIntent(decayedH, 1.0);
+
+            const revisions: NoteRevision[] = Array.isArray(oldPayload.revisions) ? [...oldPayload.revisions] : [];
+            if (oldPayload.content !== newContent) {
+              revisions.unshift({
+                timestamp: nowIso,
+                content: oldPayload.content,
+                title: oldPayload.title,
+                entity_name: oldPayload.entity_name,
+                aliases: oldPayload.aliases,
+                relations: oldPayload.relations,
+                tags: oldPayload.tags,
+                reason: `[医生归并更新] ${doctorNotes}`
+              });
+              if (revisions.length > 5) revisions.length = 5;
+            }
+
             await upsertMemoryPoint(memoryId, newVector, {
               ...oldPayload,
               content: newContent,
               status: "active",
               suspicion_count: 0,
-              t_last_update: nowMs
+              h_spectrum: nextH,
+              t_last_update: nowMs,
+              t_last_strong: nowMs,
+              revisions: revisions.length > 0 ? revisions : undefined
             }, env);
           } else {
+            const nextH = injectIntent(decayedH, 0.5);
             await setPointPayload(memoryId, {
               status: "active",
               suspicion_count: 0,
-              t_last_update: nowMs
+              h_spectrum: nextH,
+              t_last_update: nowMs,
+              t_last_strong: nowMs
             }, env);
           }
 
@@ -3010,6 +3116,7 @@ export async function executeToolCall(
       success: true,
       case_id: rawCaseId,
       memory_id: memoryId,
+      new_memory_id: resultingNewMemoryId,
       verdict,
       treatment: treatment || null,
       concerns_closed: updatedCount,
