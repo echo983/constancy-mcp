@@ -192,6 +192,85 @@ export interface EvaluatedMemory {
   relations?: string[];
 }
 
+export interface LineageNodeSummary {
+  generation: number;
+  is_current_target: boolean;
+  id: string;
+  created_at?: string;
+  updated_at?: string;
+  type?: string;
+  status: string;
+  retired: boolean;
+  retired_reason?: string;
+  source?: MemorySourceType;
+  source_badge: string;
+  ch_prior: number;
+  ch_dynamic: number;
+  resonant_heat: number;
+  content_snippet: string;
+  entity_name?: string;
+  aliases?: string[];
+  relations?: string[];
+  revisions_count: number;
+  annotations_count: number;
+  predecessor?: string;
+  superseded_by?: string;
+}
+
+export interface InspectMemoryResult {
+  success: boolean;
+  target_id: string;
+  target_details: {
+    id: string;
+    user_id: string;
+    content: string;
+    title?: string;
+    type?: string;
+    status: string;
+    retired: boolean;
+    retired_at?: string;
+    retired_reason?: string;
+    source?: MemorySourceType;
+    source_badge: string;
+    ch_prior: number;
+    ch_dynamic: number;
+    resonant_heat: number;
+    h_spectrum: number[];
+    validity: number;
+    health_status: string;
+    health_badge: string;
+    created_at?: string;
+    updated_at?: string;
+    entity_name?: string;
+    aliases?: string[];
+    relations?: string[];
+    entities?: string[];
+    tags?: string[];
+    revisions?: NoteRevision[];
+    revisions_count: number;
+    annotations?: MemoryAnnotation[];
+    annotations_count: number;
+    predecessor?: string;
+    superseded_by?: string;
+    image_id?: string;
+    has_base64: boolean;
+    base64_length?: number;
+    sha256?: string;
+    mime_type?: string;
+    defer_count?: number;
+    suspicion_count?: number;
+    pending_user_confirmation?: boolean;
+  };
+  genealogy: {
+    root_id: string;
+    latest_active_id: string;
+    target_generation: number;
+    total_generations: number;
+    lineage_chain: LineageNodeSummary[];
+  };
+  message: string;
+}
+
 export function getSourceBadge(source?: MemorySourceType): string {
   switch (source) {
     case "user_stated":

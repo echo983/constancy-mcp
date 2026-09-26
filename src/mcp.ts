@@ -20,7 +20,9 @@ import {
   DoctorVerdict,
   DoctorTreatment,
   ConcernSeverity,
-  InteractionMode
+  InteractionMode,
+  InspectMemoryResult,
+  LineageNodeSummary
 } from "./actd";
 import { getEmbedding, VoyageEnv } from "./voyage";
 import {
@@ -744,6 +746,24 @@ export const MCP_TOOLS = [
         }
       },
       required: ["case_id", "memory_id", "verdict", "doctor_notes"]
+    }
+  },
+  {
+    name: "inspect_memory",
+    description: "【认知基因透视/单点因果验血】按 ID 精确获取指定记忆点的完整底层元数据（含 7 维时间热度谱、时效健康度 V、不可变版本链 revisions 与附注 annotations），并自动双向递归追溯其因果前身链 (predecessor) 与后继更迭链 (superseded_by)，完整呈现从初代根源到最新活跃代的世代全景。支持查阅已废弃/归档的历史记忆。纯只读诊断，零热力学能量扰动，绝不篡改记忆生命周期。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "目标记忆点 ID、UUID、前缀简码 (例如 'CASE-B67F5C30' 或 'b67f5c30') 或关联图片 ID"
+        },
+        max_depth: {
+          type: "number",
+          description: "世代追溯最大深度，默认 5，最大上限 10（防止环路与过度消耗）"
+        }
+      },
+      required: ["id"]
     }
   }
 ];
@@ -3126,6 +3146,179 @@ export async function executeToolCall(
     };
   }
 
+  // 17. Tool: inspect_memory (Genealogy & Thermal Provenance Deep Inspection)
+  if (name === "inspect_memory") {
+    const rawTargetId = String(args.id || "").trim();
+    if (!rawTargetId) {
+      throw new Error("Missing required argument: id");
+    }
+
+    const maxDepth = Math.min(Math.max(Number(args.max_depth) || 5, 1), 10);
+
+    // 1. Resolve target memory point polymorphically (supports UUID, CASE- prefix, image_id)
+    const resolved = await resolveTargetMemoryPoint(rawTargetId, userId, env);
+    if (!resolved || !resolved.payload) {
+      throw new Error(`记忆点或关联资产 '${rawTargetId}' 未找到或无权访问。`);
+    }
+
+    const targetPointId = resolved.pointId;
+    const targetPayload = resolved.payload;
+
+    // Helper to compute node metrics without modifying database
+    const computeNodeMetrics = (p: MemoryPointPayload) => {
+      const decayedH = decaySpectrum(p.h_spectrum || new Array(7).fill(0), p.t_last_update || nowMs, nowMs);
+      const chPrior = p.ch_prior ?? (p.type === "entity" ? 11.5 : 9.0);
+      const chDynamic = computeDynamicCh(chPrior, decayedH);
+      const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
+      const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
+      const classification = classifyHealth(V, p.tags || [], p.type || "", Boolean(p.retired), p.retired_reason || "", p.annotations);
+
+      return {
+        decayedH,
+        chPrior,
+        chDynamic,
+        resonantHeat: Number(resonantHeat.toFixed(2)),
+        validity: V,
+        classification
+      };
+    };
+
+    // 2. Trace upstream ancestors (predecessors)
+    const ancestors: Array<{ id: string; payload: MemoryPointPayload }> = [];
+    const visitedIds = new Set<string>([targetPointId]);
+    let currPred = targetPayload.predecessor;
+
+    while (currPred && ancestors.length < maxDepth) {
+      if (visitedIds.has(currPred)) break; // cycle protection
+      visitedIds.add(currPred);
+
+      const parentPoint = await getPointById(currPred, env);
+      if (!parentPoint || !parentPoint.payload || (parentPoint.payload.user_id && parentPoint.payload.user_id !== userId)) {
+        break; // stop at unauthorized or missing boundary
+      }
+
+      ancestors.unshift({ id: currPred, payload: parentPoint.payload });
+      currPred = parentPoint.payload.predecessor;
+    }
+
+    // 3. Trace downstream descendants (successors)
+    const descendants: Array<{ id: string; payload: MemoryPointPayload }> = [];
+    let currSucc = targetPayload.superseded_by;
+
+    while (currSucc && descendants.length < maxDepth) {
+      if (visitedIds.has(currSucc)) break; // cycle protection
+      visitedIds.add(currSucc);
+
+      const childPoint = await getPointById(currSucc, env);
+      if (!childPoint || !childPoint.payload || (childPoint.payload.user_id && childPoint.payload.user_id !== userId)) {
+        break; // stop at unauthorized or missing boundary
+      }
+
+      descendants.push({ id: currSucc, payload: childPoint.payload });
+      currSucc = childPoint.payload.superseded_by;
+    }
+
+    // 4. Assemble full chronological lineage
+    const fullChain = [
+      ...ancestors,
+      { id: targetPointId, payload: targetPayload },
+      ...descendants
+    ];
+
+    const targetGenIndex = ancestors.length + 1;
+    const totalGens = fullChain.length;
+
+    const lineageSummaries: LineageNodeSummary[] = fullChain.map((node, idx) => {
+      const p = node.payload;
+      const metrics = computeNodeMetrics(p);
+      const isTarget = node.id === targetPointId;
+
+      return {
+        generation: idx + 1,
+        is_current_target: isTarget,
+        id: node.id,
+        created_at: p.created_at || p.timestamp,
+        updated_at: p.updated_at,
+        type: p.type,
+        status: p.status || (p.retired ? "expired" : "active"),
+        retired: Boolean(p.retired),
+        retired_reason: p.retired_reason,
+        source: p.source,
+        source_badge: getSourceBadge(p.source),
+        ch_prior: metrics.chPrior,
+        ch_dynamic: metrics.chDynamic,
+        resonant_heat: metrics.resonantHeat,
+        content_snippet: p.content.length > 150 ? `${p.content.slice(0, 150)}...` : p.content,
+        entity_name: p.entity_name,
+        aliases: p.aliases,
+        relations: p.relations,
+        revisions_count: Array.isArray(p.revisions) ? p.revisions.length : 0,
+        annotations_count: Array.isArray(p.annotations) ? p.annotations.length : 0,
+        predecessor: p.predecessor,
+        superseded_by: p.superseded_by
+      };
+    });
+
+    // 5. Target node full metrics & payload details
+    const targetMetrics = computeNodeMetrics(targetPayload);
+
+    const result: InspectMemoryResult = {
+      success: true,
+      target_id: targetPointId,
+      target_details: {
+        id: targetPointId,
+        user_id: targetPayload.user_id,
+        content: targetPayload.content,
+        title: targetPayload.title,
+        type: targetPayload.type,
+        status: targetPayload.status || (targetPayload.retired ? "expired" : "active"),
+        retired: Boolean(targetPayload.retired),
+        retired_at: targetPayload.retired_at,
+        retired_reason: targetPayload.retired_reason,
+        source: targetPayload.source,
+        source_badge: getSourceBadge(targetPayload.source),
+        ch_prior: targetMetrics.chPrior,
+        ch_dynamic: targetMetrics.chDynamic,
+        resonant_heat: targetMetrics.resonantHeat,
+        h_spectrum: targetPayload.h_spectrum || new Array(7).fill(0),
+        validity: targetMetrics.validity,
+        health_status: targetMetrics.classification.status,
+        health_badge: targetMetrics.classification.badge,
+        created_at: targetPayload.created_at || targetPayload.timestamp,
+        updated_at: targetPayload.updated_at,
+        entity_name: targetPayload.entity_name,
+        aliases: targetPayload.aliases,
+        relations: targetPayload.relations,
+        entities: targetPayload.entities,
+        tags: targetPayload.tags,
+        revisions: targetPayload.revisions,
+        revisions_count: Array.isArray(targetPayload.revisions) ? targetPayload.revisions.length : 0,
+        annotations: targetPayload.annotations,
+        annotations_count: Array.isArray(targetPayload.annotations) ? targetPayload.annotations.length : 0,
+        predecessor: targetPayload.predecessor,
+        superseded_by: targetPayload.superseded_by,
+        image_id: targetPayload.image_id,
+        has_base64: Boolean(targetPayload.base64),
+        base64_length: targetPayload.base64 ? targetPayload.base64.length : undefined,
+        sha256: targetPayload.sha256,
+        mime_type: targetPayload.mime_type,
+        defer_count: targetPayload.defer_count,
+        suspicion_count: targetPayload.suspicion_count,
+        pending_user_confirmation: targetPayload.pending_user_confirmation
+      },
+      genealogy: {
+        root_id: fullChain[0].id,
+        latest_active_id: fullChain[fullChain.length - 1].id,
+        target_generation: targetGenIndex,
+        total_generations: totalGens,
+        lineage_chain: lineageSummaries
+      },
+      message: `🔬 记忆点 [${targetPointId}] 诊断完成：处于因果演化链第 ${targetGenIndex}/${totalGens} 世代（当前状态: ${targetPayload.status || (targetPayload.retired ? "expired" : "active")}，来源: ${getSourceBadge(targetPayload.source)}，动态常度: ${targetMetrics.chDynamic}）。`
+    };
+
+    return result;
+  }
+
   throw new Error(`Unknown tool: ${name}`);
 }
 
@@ -3152,7 +3345,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.6.5",
+          version: "1.6.6",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }
