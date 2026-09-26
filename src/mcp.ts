@@ -1647,6 +1647,7 @@ export async function executeToolCall(
     }));
 
     return {
+      version: "1.7.1",
       id: point.id,
       type: p.type,
       title: p.title || undefined,
@@ -3298,6 +3299,7 @@ export async function executeToolCall(
 
     const result: InspectMemoryResult = {
       success: true,
+      version: "1.7.1",
       target_id: targetPointId,
       target_details: {
         id: targetPointId,
@@ -3381,7 +3383,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.7.0",
+          version: "1.7.1",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }
@@ -3443,12 +3445,11 @@ export async function handleMcpJsonRpc(
       return {
         jsonrpc: "2.0",
         id,
-        isError: true,
         result: {
           content: [
             {
               type: "text",
-              text: `Error executing ${name}: ${err.message}`
+              text: `[v1.7.1] Error executing ${name}: ${err.message}`
             }
           ],
           isError: true

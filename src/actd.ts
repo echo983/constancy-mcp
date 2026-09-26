@@ -221,6 +221,7 @@ export interface LineageNodeSummary {
 
 export interface InspectMemoryResult {
   success: boolean;
+  version?: string;
   target_id: string;
   target_details: {
     id: string;
