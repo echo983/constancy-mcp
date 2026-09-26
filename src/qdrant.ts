@@ -852,14 +852,12 @@ export async function appendMemoryAnnotation(
   currentAnnotations.push(annotation);
 
   await setPointPayload(pointId, { 
-    annotations: currentAnnotations,
-    t_last_update: Date.now()
+    annotations: currentAnnotations
   }, env);
 
   return {
     ...point.payload,
-    annotations: currentAnnotations,
-    t_last_update: Date.now()
+    annotations: currentAnnotations
   };
 }
 

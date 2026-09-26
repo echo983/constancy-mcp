@@ -812,8 +812,10 @@ export async function executeToolCall(
       formattedContent = `${prefixMap[source]}\n${formattedContent}`;
     }
 
-    // Initial energy injection
-    const initialSpectrum = injectIntent(new Array(7).fill(0), 1.0);
+    // Initial energy injection (Centennial baseline inertia 1.5 for entities, 0 for regular memories)
+    const isEntity = type === "entity" || chPrior >= 11.5;
+    const baseEnergy = isEntity ? 1.5 : 0;
+    const initialSpectrum = injectIntent(new Array(7).fill(baseEnergy), 1.0);
 
     const payload: MemoryPointPayload = {
       user_id: userId,
@@ -2920,8 +2922,7 @@ export async function executeToolCall(
             retired_at: nowIso,
             retired_reason: `[医生更新] ${doctorNotes}`,
             superseded_by: newMemoryId,
-            annotations: currentAnnotations,
-            t_last_update: nowMs
+            annotations: currentAnnotations
           }, env);
 
           // b. Insert new memory point with predecessor link and lineage inheritance
@@ -3001,8 +3002,7 @@ export async function executeToolCall(
             retired: true,
             retired_at: nowIso,
             retired_reason: doctorNotes,
-            annotations: currentAnnotations,
-            t_last_update: nowMs
+            annotations: currentAnnotations
           }, env);
           actionDetails = `已对该病灶记忆标记失效 (status: expired)，退出活跃检索队列。`;
 
@@ -3020,8 +3020,7 @@ export async function executeToolCall(
           await setPointPayload(memoryId, {
             status: "active",
             suspicion_count: 0,
-            annotations: currentAnnotations,
-            t_last_update: nowMs
+            annotations: currentAnnotations
           }, env);
           actionDetails = `复核确认记忆准确健康，清空存疑计数，维持原状。`;
 
@@ -3048,8 +3047,7 @@ export async function executeToolCall(
                 retired_at: nowIso,
                 retired_reason: `归并入主记忆 [${memoryId}]`,
                 superseded_by: memoryId,
-                annotations: mAnnotations,
-                t_last_update: nowMs
+                annotations: mAnnotations
               }, env);
               retiredCount++;
             }
@@ -3118,14 +3116,12 @@ export async function executeToolCall(
         const suspicionCount = (oldPayload.suspicion_count || 0) + 1;
         await setPointPayload(memoryId, {
           defer_count: deferCount,
-          suspicion_count: suspicionCount,
-          t_last_update: nowMs
+          suspicion_count: suspicionCount
         }, env);
         actionDetails = `证据不足，已登记留观跟踪 (累计留观 ${deferCount} 次)，避免草率动刀。`;
       } else if (verdict === "ESCALATED_TO_USER") {
         await setPointPayload(memoryId, {
-          pending_user_confirmation: true,
-          t_last_update: nowMs
+          pending_user_confirmation: true
         }, env);
         actionDetails = `案情重大且存疑，已将案卷转送至后花园控制台，等待用户主权裁决。`;
       }
