@@ -141,6 +141,26 @@ export async function resolveTargetMemoryPoint(
     if (directPoint && directPoint.payload && directPoint.payload.user_id === userId) {
       return { pointId: cleanId, payload: directPoint.payload };
     }
+
+    // A complete UUID could also directly identify an image in the images collection
+    const imgPoint = await getImagePoint(cleanId, userId, env);
+    if (imgPoint && imgPoint.payload) {
+      const resolvedImageId = imgPoint.payload.image_id || imgPoint.id;
+      const linkedNote = await findNoteByImageId(resolvedImageId, userId, env);
+      if (linkedNote && linkedNote.payload && linkedNote.payload.user_id === userId) {
+        return {
+          pointId: linkedNote.id,
+          payload: linkedNote.payload,
+          isLinkedFromImage: true,
+          imageId: resolvedImageId
+        };
+      }
+    }
+
+    // STRICT SHORT-CIRCUIT: A complete 36-character UUID is NEVER a prefix!
+    // If not found directly in memories or images, it definitely does not exist.
+    // Early exit here immediately avoids cascading multi-page prefix and note scans!
+    return null;
   }
 
   // 2. Try prefix match in constancy_memories for this user (e.g. 6+ char hex prefix)
@@ -3361,7 +3381,7 @@ export async function handleMcpJsonRpc(
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.6.6",
+          version: "1.7.0",
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }

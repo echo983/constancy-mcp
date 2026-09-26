@@ -28,7 +28,8 @@ async function qdrantFetch(url: string, env: QdrantEnv, options: RequestInit = {
     "User-Agent": "curl/8.14.1 (constancy-mcp worker)",
     ...(options.headers || {})
   };
-  return fetch(url, { ...options, headers });
+  const signal = options.signal || AbortSignal.timeout(6000);
+  return fetch(url, { ...options, headers, signal });
 }
 
 export async function upsertMemoryPoint(
@@ -360,8 +361,8 @@ export async function findMemoryPointByPrefix(
 
   let offset: string | number | undefined = undefined;
   const pageSize = 250;
-  const maxPages = 20; // Support searching up to 5,000 points
-  const matchedPoints: Array<{ id: string; payload?: MemoryPointPayload }> = [];
+  const maxPages = 4; // Support searching up to 1,000 points
+  const matchedIds: string[] = [];
 
   for (let page = 0; page < maxPages; page++) {
     const body: any = {
@@ -371,7 +372,7 @@ export async function findMemoryPointByPrefix(
           { key: "user_id", match: { value: userId } }
         ]
       },
-      with_payload: true,
+      with_payload: false, // Performance: avoid heavy payload serialization across network
       with_vector: false
     };
     if (offset !== undefined) {
@@ -388,21 +389,24 @@ export async function findMemoryPointByPrefix(
     const points: any[] = data.result?.points || [];
     for (const p of points) {
       if (String(p.id).toLowerCase().startsWith(cleanPrefix)) {
-        matchedPoints.push(p);
+        matchedIds.push(String(p.id));
       }
     }
 
     offset = data.result?.next_page_offset;
-    if (!offset || matchedPoints.length > 1) {
+    // Early exit: break if no more pages, incomplete page, or ambiguity detected (>1 matches)
+    if (!offset || points.length < pageSize || matchedIds.length > 1) {
       break;
     }
   }
 
-  if (matchedPoints.length === 0) return null;
-  if (matchedPoints.length > 1) {
-    throw new Error(`记忆点前缀 '${cleanPrefix}' 存在歧义，共匹配到 ${matchedPoints.length} 条记忆，请提供更多字符以唯一定位。`);
+  if (matchedIds.length === 0) return null;
+  if (matchedIds.length > 1) {
+    throw new Error(`记忆点前缀 '${cleanPrefix}' 存在歧义，共匹配到 ${matchedIds.length} 条记忆，请提供更多字符以唯一定位。`);
   }
-  return matchedPoints[0];
+
+  // Fetch full point payload only for the uniquely resolved target
+  return await getPointById(matchedIds[0], env);
 }
 
 export async function setPointPayload(
@@ -612,7 +616,7 @@ export async function getImagePoint(
     method: "POST",
     body: JSON.stringify({
       limit: 100,
-      with_payload: true,
+      with_payload: ["image_id", "user_id"],
       with_vector: false,
       filter: {
         must: [
@@ -630,7 +634,14 @@ export async function getImagePoint(
       String(p.payload?.image_id || "").toLowerCase() === cleanId ||
       String(p.id).toLowerCase() === cleanId
     );
-    if (exact) return exact;
+    if (exact) {
+      const fullRes = await qdrantFetch(`${qdrantUrl}/collections/images/points/${exact.id}`, env);
+      if (fullRes.ok) {
+        const fullData: any = await fullRes.json();
+        return fullData.result || exact;
+      }
+      return exact;
+    }
 
     // 2b. Prefix match on image_id or point id (if cleanId length >= 6)
     if (cleanId.length >= 6) {
@@ -639,6 +650,11 @@ export async function getImagePoint(
         String(p.id).toLowerCase().startsWith(cleanId)
       );
       if (prefixMatches.length === 1) {
+        const fullRes = await qdrantFetch(`${qdrantUrl}/collections/images/points/${prefixMatches[0].id}`, env);
+        if (fullRes.ok) {
+          const fullData: any = await fullRes.json();
+          return fullData.result || prefixMatches[0];
+        }
         return prefixMatches[0];
       }
       if (prefixMatches.length > 1) {
@@ -736,7 +752,7 @@ export async function findNoteByImageId(
       method: "POST",
       body: JSON.stringify({
         limit: 100,
-        with_payload: true,
+        with_payload: ["image_id", "content", "user_id", "retired", "status", "superseded_by"],
         with_vector: false,
         filter: {
           must: [
@@ -772,18 +788,23 @@ export async function findNoteByImageId(
 
   // Prefer active (non-retired, non-expired) note
   const activeNote = candidates.find(c => !c.payload?.retired && c.payload?.status !== "expired");
-  if (activeNote) return activeNote;
+  const selected = activeNote || candidates[0];
 
   // If all are retired/superseded, follow superseded_by chain if available
-  const newest = candidates[0];
-  if (newest.payload?.superseded_by) {
-    const successor = await getPointById(newest.payload.superseded_by, env);
+  if (selected.payload?.superseded_by) {
+    const successor = await getPointById(selected.payload.superseded_by, env);
     if (successor && successor.payload && successor.payload.user_id === userId) {
       return successor;
     }
   }
 
-  return newest;
+  // Ensure complete point payload is fetched if loaded from partial-field query
+  if (!selected.payload?.h_spectrum) {
+    const fullPoint = await getPointById(selected.id, env);
+    if (fullPoint) return fullPoint;
+  }
+
+  return selected;
 }
 
 export async function findEntityPoints(
