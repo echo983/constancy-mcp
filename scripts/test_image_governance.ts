@@ -310,6 +310,16 @@ async function run() {
     if (pointsToDelete.length > 0) {
       await deleteMemoryPoints(pointsToDelete, env).catch(err => console.warn("Note cleanup warning:", err.message));
     }
+    // Clean up concerns submitted in test 6
+    try {
+      await fetch(`${env.QDRANT_URL}/collections/constancy_concerns/points/delete?wait=true`, {
+        method: "POST",
+        headers: { "api-key": qdrantKey, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filter: { must: [{ key: "user_id", match: { value: testUserId } }] }
+        })
+      });
+    } catch (e: any) {}
     console.log("✅ Cleanup completed.");
   }
 }
