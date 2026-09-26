@@ -132,9 +132,7 @@ export async function resolveTargetMemoryPoint(
   let cleanId = (targetId || "").trim();
   if (!cleanId) return null;
 
-  if (cleanId.toUpperCase().startsWith("CASE-")) {
-    cleanId = cleanId.slice(5).trim();
-  }
+  cleanId = cleanId.replace(/^case[-_:]/i, "").trim();
 
   // 1. If valid UUID, try direct constancy_memories fetch first
   const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(cleanId);
@@ -160,8 +158,8 @@ export async function resolveTargetMemoryPoint(
     };
   }
 
-  // 4. Try prefix match in constancy_memories for this user (e.g. 8-char hex prefix)
-  if (cleanId.length >= 6 && /^[0-9a-fA-F-]+$/.test(cleanId)) {
+  // 4. Try prefix match in constancy_memories for this user (e.g. 4+ char hex prefix)
+  if (cleanId.length >= 4 && /^[0-9a-fA-F-]+$/.test(cleanId)) {
     const prefixMatch = await findMemoryPointByPrefix(cleanId, userId, env);
     if (prefixMatch && prefixMatch.payload && prefixMatch.payload.user_id === userId) {
       return {
@@ -2557,6 +2555,9 @@ export async function executeToolCall(
         tags: noteTags,
         location: location || oldP.location || undefined,
         captured_at: capturedAtIso || oldP.captured_at || nowIso,
+        created_at: oldP.created_at || oldP.timestamp || nowIso,
+        updated_at: nowIso,
+        timestamp: oldP.timestamp || nowIso,
         t_last_update: nowMs,
         t_last_strong: tLastStrong,
         h_spectrum: hSpectrum,
@@ -2572,7 +2573,8 @@ export async function executeToolCall(
       const notePayload: MemoryPointPayload = {
         user_id: userId,
         content: noteContent,
-        timestamp: capturedAtIso || nowIso,
+        timestamp: nowIso,
+        created_at: nowIso,
         captured_at: capturedAtIso || nowIso,
         location: location || undefined,
         date: capturedAtIso ? capturedAtIso.slice(0, 10) : todayStr,
@@ -3248,6 +3250,8 @@ export async function executeToolCall(
         ch_prior: metrics.chPrior,
         ch_dynamic: metrics.chDynamic,
         resonant_heat: metrics.resonantHeat,
+        h_spectrum_stored: p.h_spectrum || new Array(7).fill(0),
+        h_spectrum_decayed: metrics.decayedH,
         content_snippet: p.content.length > 150 ? `${p.content.slice(0, 150)}...` : p.content,
         entity_name: p.entity_name,
         aliases: p.aliases,
@@ -3281,6 +3285,8 @@ export async function executeToolCall(
         ch_dynamic: targetMetrics.chDynamic,
         resonant_heat: targetMetrics.resonantHeat,
         h_spectrum: targetPayload.h_spectrum || new Array(7).fill(0),
+        h_spectrum_stored: targetPayload.h_spectrum || new Array(7).fill(0),
+        h_spectrum_decayed: targetMetrics.decayedH,
         validity: targetMetrics.validity,
         health_status: targetMetrics.classification.status,
         health_badge: targetMetrics.classification.badge,

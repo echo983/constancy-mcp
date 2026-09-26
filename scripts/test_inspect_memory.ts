@@ -201,15 +201,31 @@ async function run() {
     console.log("✅ 3-Generation Causal Lineage successfully traced from middle node!");
 
     // -------------------------------------------------------------
-    // Test 4: Polymorphic ID (CASE- Prefix) Resolution
+    // Test 4: Polymorphic ID (CASE- Prefix & Short Hex Prefix) Resolution
     // -------------------------------------------------------------
-    console.log("\n--- [Test 4] Polymorphic ID (CASE- Prefix) Resolution ---");
+    console.log("\n--- [Test 4] Polymorphic ID (CASE- Prefix & Hex Prefix) Resolution ---");
     const caseIdQuery = `CASE-${gen3Id.slice(0, 8).toUpperCase()}`;
     const inspectByCaseId = await executeToolCall("inspect_memory", { id: caseIdQuery }, userA, env);
     if (!inspectByCaseId.success || inspectByCaseId.target_details?.id !== gen3Id) {
       throw new Error(`Expected inspection by CASE- ID to resolve to ${gen3Id}`);
     }
     console.log(`✅ Polymorphic ID '${caseIdQuery}' correctly resolved to target memory ${gen3Id}!`);
+
+    const rawHexPrefix = gen3Id.slice(0, 8);
+    const inspectByHex = await executeToolCall("inspect_memory", { id: rawHexPrefix }, userA, env);
+    if (!inspectByHex.success || inspectByHex.target_details?.id !== gen3Id) {
+      throw new Error(`Expected inspection by hex prefix '${rawHexPrefix}' to resolve to ${gen3Id}`);
+    }
+    console.log(`✅ Raw hex prefix '${rawHexPrefix}' correctly resolved to target memory ${gen3Id}!`);
+
+    // Verify spectrum transparency (stored vs decayed)
+    if (!Array.isArray(inspectByHex.target_details?.h_spectrum_stored) || inspectByHex.target_details.h_spectrum_stored.length !== 7) {
+      throw new Error("h_spectrum_stored missing or malformed in target_details");
+    }
+    if (!Array.isArray(inspectByHex.target_details?.h_spectrum_decayed) || inspectByHex.target_details.h_spectrum_decayed.length !== 7) {
+      throw new Error("h_spectrum_decayed missing or malformed in target_details");
+    }
+    console.log("✅ Spectrum transparency verified: h_spectrum_stored and h_spectrum_decayed present!");
 
     console.log("\n🎉 ALL INSPECT_MEMORY TESTS PASSED WITH 100% SUCCESS!");
 

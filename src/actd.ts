@@ -207,6 +207,8 @@ export interface LineageNodeSummary {
   ch_prior: number;
   ch_dynamic: number;
   resonant_heat: number;
+  h_spectrum_stored?: number[];
+  h_spectrum_decayed?: number[];
   content_snippet: string;
   entity_name?: string;
   aliases?: string[];
@@ -236,6 +238,8 @@ export interface InspectMemoryResult {
     ch_dynamic: number;
     resonant_heat: number;
     h_spectrum: number[];
+    h_spectrum_stored: number[];
+    h_spectrum_decayed: number[];
     validity: number;
     health_status: string;
     health_badge: string;

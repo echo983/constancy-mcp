@@ -357,10 +357,14 @@ export async function findMemoryPointByPrefix(
   const cleanPrefix = prefix.trim().toLowerCase();
   if (!cleanPrefix) return null;
   const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/scroll`;
-  const res = await qdrantFetch(scrollUrl, env, {
-    method: "POST",
-    body: JSON.stringify({
-      limit: 100,
+
+  let offset: string | number | undefined = undefined;
+  const pageSize = 250;
+  const maxPages = 20; // Support searching up to 5,000 points
+
+  for (let page = 0; page < maxPages; page++) {
+    const body: any = {
+      limit: pageSize,
       filter: {
         must: [
           { key: "user_id", match: { value: userId } }
@@ -368,13 +372,31 @@ export async function findMemoryPointByPrefix(
       },
       with_payload: true,
       with_vector: false
-    })
-  });
-  if (!res.ok) return null;
-  const data: any = await res.json();
-  const points: any[] = data.result?.points || [];
-  const found = points.find((p: any) => String(p.id).toLowerCase().startsWith(cleanPrefix));
-  return found || null;
+    };
+    if (offset !== undefined) {
+      body.offset = offset;
+    }
+
+    const res = await qdrantFetch(scrollUrl, env, {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) break;
+
+    const data: any = await res.json();
+    const points: any[] = data.result?.points || [];
+    const found = points.find((p: any) => String(p.id).toLowerCase().startsWith(cleanPrefix));
+    if (found) {
+      return found;
+    }
+
+    offset = data.result?.next_page_offset;
+    if (!offset) {
+      break;
+    }
+  }
+
+  return null;
 }
 
 export async function setPointPayload(
