@@ -143,28 +143,42 @@ export async function resolveTargetMemoryPoint(
     }
   }
 
-  // 2. Check if cleanId matches an image in images collection (by point UUID or image_id)
-  const imgPoint = await getImagePoint(cleanId, userId, env);
-  const resolvedImageId = imgPoint?.payload?.image_id || (imgPoint ? imgPoint.id : cleanId);
-
-  // 3. Find associated note in constancy_memories
-  const linkedNote = await findNoteByImageId(resolvedImageId, userId, env);
-  if (linkedNote && linkedNote.payload && linkedNote.payload.user_id === userId) {
-    return {
-      pointId: linkedNote.id,
-      payload: linkedNote.payload,
-      isLinkedFromImage: true,
-      imageId: resolvedImageId
-    };
-  }
-
-  // 4. Try prefix match in constancy_memories for this user (e.g. 4+ char hex prefix)
-  if (cleanId.length >= 4 && /^[0-9a-fA-F-]+$/.test(cleanId)) {
+  // 2. Try prefix match in constancy_memories for this user (e.g. 6+ char hex prefix)
+  // Direct memory point IDs ALWAYS take priority over secondary image associations!
+  if (cleanId.length >= 6 && /^[0-9a-fA-F-]+$/.test(cleanId)) {
     const prefixMatch = await findMemoryPointByPrefix(cleanId, userId, env);
     if (prefixMatch && prefixMatch.payload && prefixMatch.payload.user_id === userId) {
       return {
         pointId: prefixMatch.id,
         payload: prefixMatch.payload
+      };
+    }
+  }
+
+  // 3. Check if cleanId matches an image in images collection (by point UUID or image_id, exact or prefix)
+  const imgPoint = await getImagePoint(cleanId, userId, env);
+  if (imgPoint && imgPoint.payload) {
+    const resolvedImageId = imgPoint.payload.image_id || imgPoint.id;
+    const linkedNote = await findNoteByImageId(resolvedImageId, userId, env);
+    if (linkedNote && linkedNote.payload && linkedNote.payload.user_id === userId) {
+      return {
+        pointId: linkedNote.id,
+        payload: linkedNote.payload,
+        isLinkedFromImage: true,
+        imageId: resolvedImageId
+      };
+    }
+  }
+
+  // 4. Try matching image_id directly on notes in constancy_memories (if cleanId is an image_id prefix)
+  if (cleanId.length >= 6 && /^[0-9a-fA-F-]+$/.test(cleanId)) {
+    const linkedNoteDirect = await findNoteByImageId(cleanId, userId, env);
+    if (linkedNoteDirect && linkedNoteDirect.payload && linkedNoteDirect.payload.user_id === userId) {
+      return {
+        pointId: linkedNoteDirect.id,
+        payload: linkedNoteDirect.payload,
+        isLinkedFromImage: true,
+        imageId: cleanId
       };
     }
   }

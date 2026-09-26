@@ -227,6 +227,38 @@ async function run() {
     }
     console.log("✅ Spectrum transparency verified: h_spectrum_stored and h_spectrum_decayed present!");
 
+    // -------------------------------------------------------------
+    // Test 5: Image Prefix vs Citation Text Disambiguation (Regression test for v1.6.9)
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 5] Image Prefix vs Citation Text Disambiguation ---");
+    const testImageId = `img_${Date.now().toString(16)}_sample`;
+    
+    // Note A: Authoritative image note
+    const noteA = await executeToolCall("commit_image_record", {
+      image_id: testImageId,
+      description: "测试照片A：实验室核心设备前视图",
+      title: "核心设备前视图"
+    }, userA, env);
+    const noteAId = noteA.note_id;
+    if (noteAId) pointsToDelete.push(noteAId);
+
+    // Note B: Text note that simply mentions Note A's image_id in its narrative
+    const noteB = await executeToolCall("log_memory", {
+      content: `这是一条普通的日常备忘录。里面偶然引用了另一张照片：参见附件代码 ${testImageId}。`,
+      c_h: 8.0,
+      source: "user_stated"
+    }, userA, env);
+    const noteBId = noteB.id;
+    pointsToDelete.push(noteBId);
+
+    // Now inspect using prefix of testImageId! Must resolve to Note A, NEVER Note B!
+    const imgPrefixQuery = testImageId.slice(0, 10);
+    const inspectImgResult = await executeToolCall("inspect_memory", { id: imgPrefixQuery }, userA, env);
+    if (inspectImgResult.target_details?.id !== noteAId) {
+      throw new Error(`Expected image prefix to resolve to Note A (${noteAId}), but got ${inspectImgResult.target_details?.id} (${inspectImgResult.target_details?.content})!`);
+    }
+    console.log(`✅ Image prefix '${imgPrefixQuery}' strictly resolved to authoritative Note A (${noteAId}), zero false match on Note B!`);
+
     console.log("\n🎉 ALL INSPECT_MEMORY TESTS PASSED WITH 100% SUCCESS!");
 
   } finally {

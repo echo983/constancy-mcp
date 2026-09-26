@@ -361,6 +361,7 @@ export async function findMemoryPointByPrefix(
   let offset: string | number | undefined = undefined;
   const pageSize = 250;
   const maxPages = 20; // Support searching up to 5,000 points
+  const matchedPoints: Array<{ id: string; payload?: MemoryPointPayload }> = [];
 
   for (let page = 0; page < maxPages; page++) {
     const body: any = {
@@ -385,18 +386,23 @@ export async function findMemoryPointByPrefix(
 
     const data: any = await res.json();
     const points: any[] = data.result?.points || [];
-    const found = points.find((p: any) => String(p.id).toLowerCase().startsWith(cleanPrefix));
-    if (found) {
-      return found;
+    for (const p of points) {
+      if (String(p.id).toLowerCase().startsWith(cleanPrefix)) {
+        matchedPoints.push(p);
+      }
     }
 
     offset = data.result?.next_page_offset;
-    if (!offset) {
+    if (!offset || matchedPoints.length > 1) {
       break;
     }
   }
 
-  return null;
+  if (matchedPoints.length === 0) return null;
+  if (matchedPoints.length > 1) {
+    throw new Error(`记忆点前缀 '${cleanPrefix}' 存在歧义，共匹配到 ${matchedPoints.length} 条记忆，请提供更多字符以唯一定位。`);
+  }
+  return matchedPoints[0];
 }
 
 export async function setPointPayload(
@@ -583,30 +589,34 @@ export async function getImagePoint(
   userId: string,
   env: QdrantEnv
 ): Promise<{ id: string; payload?: any } | null> {
+  const cleanId = (targetId || "").trim().toLowerCase();
+  if (!cleanId) return null;
   const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
 
-  // 1. Try direct point ID fetch first
-  const directUrl = `${qdrantUrl}/collections/images/points/${targetId}`;
-  const directRes = await qdrantFetch(directUrl, env);
-  if (directRes.ok) {
-    const directData: any = await directRes.json();
-    if (directData.result && directData.result.payload?.user_id === userId) {
-      return directData.result;
+  // 1. If valid UUID, try direct point ID fetch first
+  const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(cleanId);
+  if (isUuid) {
+    const directUrl = `${qdrantUrl}/collections/images/points/${cleanId}`;
+    const directRes = await qdrantFetch(directUrl, env);
+    if (directRes.ok) {
+      const directData: any = await directRes.json();
+      if (directData.result && directData.result.payload?.user_id === userId) {
+        return directData.result;
+      }
     }
   }
 
-  // 2. Try matching image_id in payload
+  // 2. Scroll images for user to match exact or prefix on image_id / point UUID
   const scrollUrl = `${qdrantUrl}/collections/images/points/scroll`;
   const scrollRes = await qdrantFetch(scrollUrl, env, {
     method: "POST",
     body: JSON.stringify({
-      limit: 1,
+      limit: 100,
       with_payload: true,
       with_vector: false,
       filter: {
         must: [
-          { key: "user_id", match: { value: userId } },
-          { key: "image_id", match: { value: targetId } }
+          { key: "user_id", match: { value: userId } }
         ]
       }
     })
@@ -615,8 +625,25 @@ export async function getImagePoint(
   if (scrollRes.ok) {
     const scrollData: any = await scrollRes.json();
     const points = scrollData.result?.points || [];
-    if (points.length > 0) {
-      return points[0];
+    // 2a. Exact match on image_id or point id
+    const exact = points.find((p: any) =>
+      String(p.payload?.image_id || "").toLowerCase() === cleanId ||
+      String(p.id).toLowerCase() === cleanId
+    );
+    if (exact) return exact;
+
+    // 2b. Prefix match on image_id or point id (if cleanId length >= 6)
+    if (cleanId.length >= 6) {
+      const prefixMatches = points.filter((p: any) =>
+        String(p.payload?.image_id || "").toLowerCase().startsWith(cleanId) ||
+        String(p.id).toLowerCase().startsWith(cleanId)
+      );
+      if (prefixMatches.length === 1) {
+        return prefixMatches[0];
+      }
+      if (prefixMatches.length > 1) {
+        throw new Error(`图片 ID 前缀 '${cleanId}' 存在歧义，共匹配到 ${prefixMatches.length} 张图片，请提供更多字符。`);
+      }
     }
   }
 
@@ -674,10 +701,13 @@ export async function findNoteByImageId(
   userId: string,
   env: QdrantEnv
 ): Promise<{ id: string; payload?: MemoryPointPayload } | null> {
+  const cleanImageId = (imageId || "").trim().toLowerCase();
+  if (!cleanImageId) return null;
+
   const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
   const scrollUrl = `${qdrantUrl}/collections/${COLLECTION_NAME}/points/scroll`;
 
-  // 1. Try payload.image_id match
+  // 1. Try exact match on payload.image_id
   const res1 = await qdrantFetch(scrollUrl, env, {
     method: "POST",
     body: JSON.stringify({
@@ -687,7 +717,7 @@ export async function findNoteByImageId(
       filter: {
         must: [
           { key: "user_id", match: { value: userId } },
-          { key: "image_id", match: { value: imageId } }
+          { key: "image_id", match: { value: cleanImageId } }
         ]
       }
     })
@@ -699,7 +729,8 @@ export async function findNoteByImageId(
     candidates = data1.result?.points || [];
   }
 
-  // 2. If not found, scroll recent notes with 'image' tag and match content
+  // 2. If not found, scroll recent notes with 'image' tag and match strictly against payload.image_id prefix or [Cloudflare Images ID: <id>]
+  // NEVER do loose substring content.includes(imageId) on raw narrative text!
   if (candidates.length === 0) {
     const res2 = await qdrantFetch(scrollUrl, env, {
       method: "POST",
@@ -719,9 +750,19 @@ export async function findNoteByImageId(
       const data2: any = await res2.json();
       const points = data2.result?.points || [];
       for (const pt of points) {
-        const content = pt.payload?.content || "";
-        if (content.includes(imageId)) {
+        const pImgId = String(pt.payload?.image_id || "").toLowerCase().trim();
+        if (pImgId && (pImgId === cleanImageId || (cleanImageId.length >= 6 && pImgId.startsWith(cleanImageId)))) {
           candidates.push(pt);
+          continue;
+        }
+        // Match explicit structured tag [Cloudflare Images ID: <id>]
+        const content = String(pt.payload?.content || "");
+        const tagMatch = content.match(/\[(?:Cloudflare Images ID|图片 ID):\s*([a-zA-Z0-9_-]+)\]/i);
+        if (tagMatch) {
+          const taggedId = tagMatch[1].toLowerCase().trim();
+          if (taggedId === cleanImageId || (cleanImageId.length >= 6 && taggedId.startsWith(cleanImageId))) {
+            candidates.push(pt);
+          }
         }
       }
     }
