@@ -385,6 +385,28 @@ export const MCP_TOOLS = [
     }
   },
   {
+    name: "update_memory",
+    description: "【事实更迭/世代换代】当用户直陈事实发生变更、或需对既有记忆进行明确纠错更正时调用。系统会自动将旧版本记忆安全退役归档（保留不可变历史痕迹），并以修正后的新内容即时生成新世代记忆、重算高精度向量嵌入，同时平滑继承前身谱系能量与人基常度 C_H。保证后续语义检索 100% 准确命中新事实，彻底根除模型歧义与多轮工具递归开销。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "待更迭的原记忆 ID (支持完整 UUID、6+ 位前缀简码或 CASE- 编号)"
+        },
+        content: {
+          type: "string",
+          description: "更正后的全新完整记忆正文 (纯 Markdown 格式，力求完整、准确地陈述最新事实)"
+        },
+        reason: {
+          type: "string",
+          description: "更迭原因或事实依据 (可选，例如：'用户亲口直陈已迁往上海')"
+        }
+      },
+      required: ["id", "content"]
+    }
+  },
+  {
     name: "upsert_entity",
     description: "登记或更新跨越周期的核心常青实体百科（如硬件参数、系统架构组件、团队规范），赋予高阶百年基石常度 (C_H ≥ 11.5，折合半衰期约 100 年)。具备同名幂等更新、revisions 版本审计留痕与历史重复条目自动软归档（retire）能力，绝不破坏历史审计链。",
     inputSchema: {
@@ -1015,9 +1037,19 @@ export async function executeToolCall(
 
       // 5. Filter by min_validity threshold (default >= 0.2, discarding DORMANT)
       if (V >= minValidity) {
+        let displayContent = p.content;
+        if (p.annotations && p.annotations.length > 0) {
+          const hasDoubt = p.annotations.some((a: any) => a.kind === "contradiction" || a.kind === "doubt" || a.kind === "caveat");
+          if (hasDoubt) {
+            const notesSummary = p.annotations.map((a: any) => a.text).join("; ");
+            displayContent = `【⚠️ 事实存疑待核】${p.content}\n\n> ⚠️【存疑/注意事项】: ${notesSummary}`;
+          }
+        }
+
         evaluatedList.push({
           id: item.id,
-          content: p.content,
+          content: displayContent,
+          original_content: p.content !== displayContent ? p.content : undefined,
           type: p.type,
           source: p.source || undefined,
           source_badge: getSourceBadge(p.source),
@@ -1400,6 +1432,157 @@ export async function executeToolCall(
       status: "DORMANT",
       status_badge: "⚪ 已废弃归档 (Retired)",
       message: `📦 记忆 [${pointId}] 已标记为废弃归档 (原因: ${reason})。未来检索将自动物理屏蔽，彻底避免幽灵干扰。`
+    };
+  }
+
+  // 5b. Tool: update_memory (Generational Turnover & Fact Correction)
+  if (name === "update_memory") {
+    const rawId = (args.id || "").trim();
+    const updatedContent = (args.content || "").trim();
+    const reason = (args.reason || "").trim() || "用户事实更迭更正";
+    if (!rawId || !updatedContent) {
+      throw new Error("Missing required argument: id or content");
+    }
+
+    const resolved = await resolveTargetMemoryPoint(rawId, userId, env);
+    if (!resolved || !resolved.payload || resolved.payload.user_id !== userId) {
+      throw new Error(`Memory point or associated image '${rawId}' not found or unauthorized`);
+    }
+
+    const oldPointId = resolved.pointId;
+    const oldPayload = resolved.payload;
+    const nowIso = new Date().toISOString();
+
+    // 1. Create a brand new point ID for the new generation
+    const newMemoryId = crypto.randomUUID();
+
+    // 2. Mark old memory as retired + superseded_by newMemoryId + append annotation
+    const annotation: MemoryAnnotation = {
+      id: crypto.randomUUID(),
+      timestamp: nowIso,
+      kind: "correction",
+      text: `【事实更迭换代】${reason}（后继世代: ${newMemoryId}）`,
+      source: "user_stated"
+    };
+    const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
+    currentAnnotations.push(annotation);
+
+    await setPointPayload(oldPointId, {
+      status: "expired",
+      retired: true,
+      retired_at: nowIso,
+      retired_reason: reason,
+      superseded_by: newMemoryId,
+      annotations: currentAnnotations,
+      ch_prior: 0.0,
+      h_spectrum: new Array(7).fill(0),
+      t_last_update: nowMs,
+      t_last_strong: nowMs - 100000000000 // force V to 0 for old point
+    }, env);
+
+    // If linked from image, also retire old image point(s) in images collection
+    const resolvedImageId = resolved.imageId || extractAssociatedImageId(oldPayload);
+    if (resolvedImageId) {
+      const imgPoints = await findImagePointsByImageId(resolvedImageId, userId, env);
+      if (imgPoints.length > 0) {
+        const qdrantUrl = env.QDRANT_URL.replace(/\/+$/, "");
+        for (const ipt of imgPoints) {
+          await fetch(`${qdrantUrl}/collections/images/points/payload?wait=true`, {
+            method: "POST",
+            headers: {
+              "api-key": env.QDRANT_API_KEY?.trim() || "",
+              "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+              points: [ipt.id],
+              payload: { retired: true, retired_at: nowIso, retired_reason: reason, superseded_by: newMemoryId }
+            })
+          });
+        }
+      }
+    }
+
+    // 3. Compute new vector embedding for the updated content
+    const newVector = await getEmbedding(updatedContent, env, "document");
+
+    // 4. Inherit thermal spectrum with decay & intent injection (continuous lineage)
+    const baseH = (Array.isArray(oldPayload.h_spectrum) && oldPayload.h_spectrum.length === 7)
+      ? oldPayload.h_spectrum
+      : (oldPayload.type === "entity" ? new Array(7).fill(1.5) : new Array(7).fill(0));
+    const decayedH = decaySpectrum(baseH, oldPayload.t_last_update || nowMs, nowMs);
+    const nextH = injectIntent(decayedH, 1.0);
+
+    // 5. Preserve revisions audit trail
+    const revisions: NoteRevision[] = Array.isArray(oldPayload.revisions) ? [...oldPayload.revisions] : [];
+    if (oldPayload.content !== updatedContent) {
+      revisions.unshift({
+        timestamp: nowIso,
+        content: oldPayload.content,
+        title: oldPayload.title,
+        entity_name: oldPayload.entity_name,
+        aliases: oldPayload.aliases,
+        relations: oldPayload.relations,
+        tags: oldPayload.tags,
+        reason: reason
+      });
+      if (revisions.length > 5) {
+        revisions.length = 5;
+      }
+    }
+
+    // 6. Inherit epistemic provenance
+    const inheritedSource: MemorySourceType = oldPayload.source || "user_stated";
+
+    const chPrior = oldPayload.ch_prior ?? (oldPayload.type === "entity" ? 11.5 : 9.0);
+    const chDynamic = computeDynamicCh(chPrior, nextH);
+    const resonantHeat = interpolateResonantHeat(nextH, chDynamic);
+    const V = computeEpistemicHealth(chDynamic, resonantHeat, nowMs, nowMs);
+    const classification = classifyHealth(V, oldPayload.tags || [], oldPayload.type || "", false, "", undefined);
+
+    const newPayload: MemoryPointPayload = {
+      user_id: oldPayload.user_id || userId,
+      content: updatedContent,
+      title: oldPayload.title,
+      timestamp: nowIso,
+      created_at: oldPayload.created_at || oldPayload.timestamp || nowIso,
+      updated_at: nowIso,
+      date: nowIso.slice(0, 10),
+      type: oldPayload.type || "insight",
+      entity_name: oldPayload.entity_name || undefined,
+      aliases: oldPayload.aliases || undefined,
+      relations: oldPayload.relations || undefined,
+      entities: (oldPayload.entities && oldPayload.entities.length > 0)
+        ? oldPayload.entities
+        : (oldPayload.entity_name ? [oldPayload.entity_name, ...(oldPayload.aliases || [])] : []),
+      tags: oldPayload.tags || [],
+      source: inheritedSource,
+      ch_prior: chPrior,
+      h_spectrum: nextH,
+      t_last_update: nowMs,
+      t_last_strong: nowMs,
+      status: "active",
+      predecessor: oldPointId,
+      image_id: oldPayload.image_id || undefined,
+      location: oldPayload.location || undefined,
+      revisions: revisions.length > 0 ? revisions : undefined
+    };
+
+    await upsertMemoryPoint(newMemoryId, newVector, newPayload, env);
+
+    // If there were pending concerns for oldPointId, mark them resolved
+    if (oldPayload.pending_user_confirmation) {
+      await updateCaseConcerns(userId, oldPointId, "USER-UPDATE", "RESOLVED", "UPDATE", `用户直接调用 update_memory 完成世代更迭: ${reason}`, env);
+    }
+
+    return {
+      success: true,
+      id: newMemoryId,
+      predecessor: oldPointId,
+      content: updatedContent,
+      validity: V,
+      status: classification.status,
+      status_badge: classification.badge,
+      message: `🌱 记忆已成功完成世代更迭换代。新世代 [${newMemoryId}] 已完成向量重算与谱系继承；旧世代 [${oldPointId}] 已安全归档退役。`
     };
   }
 

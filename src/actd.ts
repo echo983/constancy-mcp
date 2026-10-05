@@ -176,6 +176,7 @@ export interface EvaluatedMemory {
   source_badge?: string;
   annotations?: MemoryAnnotation[];
   has_annotations?: boolean;
+  original_content?: string;
 
   // Optional Note & Raw Scratchpad Fields
   title?: string;
