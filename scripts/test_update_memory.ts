@@ -87,10 +87,20 @@ async function runTests() {
     // 5. Qdrant: Update Payload (/points/payload)
     if (urlStr.includes("/collections/constancy_memories/points/payload")) {
       const body = JSON.parse((init?.body as string) || "{}");
-      const pointIds = body.points || [];
+      let pointIds = body.points || [];
+      if (body.filter?.must) {
+        const hasIdFilter = body.filter.must.find((m: any) => m.has_id);
+        if (hasIdFilter) {
+          pointIds = hasIdFilter.has_id;
+        }
+      }
       for (const pid of pointIds) {
         const pt = store.get(pid);
         if (pt) {
+          const mustNotRetired = body.filter?.must_not?.some((mn: any) => mn.key === "retired" && mn.match?.value === true);
+          if (mustNotRetired && pt.payload?.retired) {
+            continue; // Skipped due to CAS condition
+          }
           pt.payload = { ...pt.payload, ...body.payload };
         }
       }
@@ -331,6 +341,167 @@ async function runTests() {
       throw new Error("❌ search_memory original_content not preserved!");
     }
     console.log("✅ search_memory successfully projected doubt banner and preserved original_content!");
+
+    // -------------------------------------------------------------
+    // Test 7: Rejection of update_memory on Already-Retired Memory (Resurrection Protection)
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 7] Reject update_memory on Already-Retired Memory ---");
+    const retiredMemoryId = "77777777-7777-7777-7777-777777777777";
+    store.set(retiredMemoryId, {
+      id: retiredMemoryId,
+      vector: new Array(1024).fill(0.01),
+      payload: {
+        user_id: userA,
+        content: "旧事实：用户使用 ThinkPad",
+        timestamp: "2026-08-01T10:00:00.000Z",
+        date: "2026-08-01",
+        type: "insight",
+        source: "user_stated",
+        ch_prior: 0.0,
+        status: "expired",
+        retired: true,
+        retired_at: "2026-09-01T10:00:00.000Z",
+        retired_reason: "用户换电脑了，演练结束归档",
+        tags: ["hardware"]
+      }
+    });
+
+    try {
+      await executeToolCall("update_memory", {
+        id: retiredMemoryId,
+        content: "试图换代复活已退役记忆：改成 Framework 16"
+      }, userA, env);
+      throw new Error("❌ update_memory on retired memory should have been rejected!");
+    } catch (err: any) {
+      if (!err.message.includes("换代被拒绝：目标记忆") || !err.message.includes("已处于退役归档状态")) {
+        throw new Error(`❌ Unexpected error message: ${err.message}`);
+      }
+      console.log(`✅ Correctly rejected update_memory on retired memory: "${err.message}"`);
+    }
+
+    // -------------------------------------------------------------
+    // Test 8: Rejection of update_memory on Already-Superseded Memory (Lineage Protection)
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 8] Reject update_memory on Already-Superseded Memory ---");
+    // originalMemoryId was superseded by newId ('9aa7e8e2...') in Test 4
+    try {
+      await executeToolCall("update_memory", {
+        id: originalMemoryId,
+        content: "试图在初代旧版本上分叉更新"
+      }, userA, env);
+      throw new Error("❌ update_memory on superseded memory should have been rejected!");
+    } catch (err: any) {
+      if (!err.message.includes("换代冲突（陈旧/分叉换代）") || !err.message.includes("最新活跃世代为")) {
+        throw new Error(`❌ Unexpected error message: ${err.message}`);
+      }
+      console.log(`✅ Correctly rejected update_memory on superseded memory: "${err.message}"`);
+    }
+
+    // -------------------------------------------------------------
+    // Test 9: Concurrent Race Condition & CAS Split-Brain Protection
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 9] Concurrent Race Condition & CAS Split-Brain Protection ---");
+    const racePointId = "88888888-8888-8888-8888-888888888888";
+    store.set(racePointId, {
+      id: racePointId,
+      vector: new Array(1024).fill(0.01),
+      payload: {
+        user_id: userA,
+        content: "用户的主力 NAS 位于书房",
+        timestamp: "2026-08-01T10:00:00.000Z",
+        date: "2026-08-01",
+        type: "insight",
+        source: "user_stated",
+        ch_prior: 9.5,
+        h_spectrum: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05],
+        status: "active",
+        tags: ["nas", "home"]
+      }
+    });
+
+    // Run two concurrent update calls
+    const [resX, resY] = await Promise.allSettled([
+      executeToolCall("update_memory", { id: racePointId, content: "NAS 迁往客厅 (分支X)" }, userA, env),
+      executeToolCall("update_memory", { id: racePointId, content: "NAS 迁往地下室 (分支Y)" }, userA, env)
+    ]);
+
+    const successes = [resX, resY].filter(r => r.status === "fulfilled");
+    const rejections = [resX, resY].filter(r => r.status === "rejected");
+
+    console.log(`Concurrent results: ${successes.length} fulfilled, ${rejections.length} rejected`);
+    if (successes.length !== 1 || rejections.length !== 1) {
+      throw new Error(`❌ Exactly 1 update should succeed and 1 should fail, got ${successes.length} successes and ${rejections.length} rejections!`);
+    }
+
+    const winningResult = (successes[0] as PromiseFulfilledResult<any>).value;
+    const losingError = (rejections[0] as PromiseRejectedResult).reason;
+    console.log(`✅ Winning generation ID: ${winningResult.id}`);
+    console.log(`✅ Losing call safely rejected with: "${losingError.message}"`);
+
+    // Verify root point points ONLY to the winner
+    const raceRoot = store.get(racePointId);
+    if (raceRoot.payload.superseded_by !== winningResult.id) {
+      throw new Error(`❌ Root point superseded_by [${raceRoot.payload.superseded_by}] does not match winner [${winningResult.id}]!`);
+    }
+    console.log("✅ Root point cleanly points to the single winner. Split-brain prevented!");
+
+    // -------------------------------------------------------------
+    // Test 10: Epistemic Guidance Differentiation (model_suggested vs user_stated)
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 10] Epistemic Guidance Differentiation ---");
+    const memoPointId = "66666666-6666-6666-6666-666666666666";
+    store.set(memoPointId, {
+      id: memoPointId,
+      vector: new Array(1024).fill(0.01),
+      payload: {
+        user_id: userA,
+        content: "建议考虑为 NAS 增加一块备份硬盘",
+        timestamp: new Date().toISOString(),
+        date: "2026-10-05",
+        type: "memo",
+        source: "model_suggested",
+        ch_prior: 9.0,
+        h_spectrum: [1.0, 0.8, 0.6, 0.4, 0.2, 0.1, 0.05],
+        status: "active",
+        tags: ["nas", "recommendation"]
+      }
+    });
+
+    const searchMemoRes = await executeToolCall("search_memory", { query: "备份硬盘" }, userA, env);
+    const foundMemo = (searchMemoRes.memories || []).find((m: any) => m.id === memoPointId);
+    if (!foundMemo) {
+      throw new Error("❌ model_suggested memo not found in search results!");
+    }
+    console.log("Memo Status Badge:", foundMemo.status_badge);
+    console.log("Memo Prompt Guidance:", foundMemo.prompt_guidance);
+
+    if (!foundMemo.status_badge.includes("模型建议")) {
+      throw new Error(`❌ Expected status_badge to mention '模型建议', got: ${foundMemo.status_badge}`);
+    }
+    if (foundMemo.prompt_guidance.includes("坚实先验引用") || foundMemo.prompt_guidance.includes("无需向用户多余确认")) {
+      throw new Error(`❌ model_suggested memo must NOT be guided as solid fact without confirmation! Got: ${foundMemo.prompt_guidance}`);
+    }
+    if (!foundMemo.prompt_guidance.includes("严禁武断定性为用户已确立的既成事实")) {
+      throw new Error(`❌ Expected guidance to warn against asserting suggestion as fact! Got: ${foundMemo.prompt_guidance}`);
+    }
+    console.log("✅ Epistemic guidance correctly prevents model suggestions from being treated as established facts!");
+
+    // -------------------------------------------------------------
+    // Test 11: Content Immutability & Clean Storage
+    // -------------------------------------------------------------
+    console.log("\n--- [Test 11] Content Immutability & Clean Storage ---");
+    const logRes = await executeToolCall("log_memory", {
+      content: "纯净内容测试：用户常喝普洱茶",
+      source: "user_stated",
+      type: "insight",
+      tags: ["tea", "habit"]
+    }, userA, env);
+
+    const loggedPoint = store.get(logRes.id);
+    if (loggedPoint.payload.content.startsWith("【来源:")) {
+      throw new Error(`❌ Stored content must not have '【来源:' prefix! Got: ${loggedPoint.payload.content}`);
+    }
+    console.log("✅ Stored content is clean without artificial prefix:", loggedPoint.payload.content);
 
     console.log("\n🎉 ALL UNIT AND INTEGRATION TESTS PASSED 100%!");
   } finally {

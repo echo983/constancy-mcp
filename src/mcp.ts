@@ -42,6 +42,7 @@ import {
   getPointById,
   findMemoryPointByPrefix,
   setPointPayload,
+  setPointPayloadWithFilter,
   scrollNotes,
   parseDateFilter,
   parseNearFilter,
@@ -214,7 +215,7 @@ export interface McpEnv extends VoyageEnv, QdrantEnv {
   IMAGES?: any;
 }
 
-export const CONSTANCY_VERSION = "1.9.0";
+export const CONSTANCY_VERSION = "1.9.1";
 
 export function generateAgentInitInfo(
   role: string = "chat",
@@ -1094,24 +1095,17 @@ export async function executeToolCall(
     const tags = Array.isArray(args.tags) ? args.tags : [];
 
     // 门口硬门禁：只有 user_stated 才能建立决策或待办任务！
-    const hasTodoOrAction = tags.some((t: string) => /todo|待办|action|task|计划/i.test(t)) || /待办|TODO/i.test(content);
-    if ((type === "decision" || hasTodoOrAction) && source !== "user_stated") {
+    const hasTodoOrActionTag = tags.some((t: string) => /todo|待办|action|task|计划/i.test(t));
+    const hasTodoDirective = /(?:^|\n)\s*(?:[-*]\s*\[[\sXx]?\]|(?:\bTODO\b|待办事项?|待做事项|Action\s*item)[\s:：]?|(?:需完成|待跟进)[\s:：]?)/i.test(content) ||
+      /(?:^|[\s,，。；;])(?:待办|TODO)(?:[\s:：]|$)/i.test(content);
+    if ((type === "decision" || hasTodoOrActionTag || hasTodoDirective) && source !== "user_stated") {
       throw new Error(
         `❌ 门口硬门禁拦截：只有用户明确陈述 ('user_stated') 才能登记为决策 (decision) 或待办任务 (todo)。当前来源标记为 '${source}'。模型的主动提议或推断请登记为 'insight' / 'memo'，严禁越权替用户设立待办或决策！`
       );
     }
 
-    // 规范化来源前缀
-    let formattedContent = content;
-    const prefixMap: Record<MemorySourceType, string> = {
-      user_stated: "【来源: 用户直陈】",
-      model_suggested: "【来源: 模型建议】",
-      model_inferred: "【来源: 模型推断】",
-      external: "【来源: 外部输入】"
-    };
-    if (!formattedContent.startsWith("【来源:")) {
-      formattedContent = `${prefixMap[source]}\n${formattedContent}`;
-    }
+    // 保留不可变纯净正文（去除历史遗留的人工前缀，保持语义向量与不可变历史精确）
+    const cleanContent = content.replace(/^【来源:[^】]*】\s*\n?/, "").trim();
 
     // Initial energy injection (Centennial baseline inertia 1.5 for entities, 0 for regular memories)
     const isEntity = type === "entity" || chPrior >= 11.5;
@@ -1120,7 +1114,7 @@ export async function executeToolCall(
 
     const payload: MemoryPointPayload = {
       user_id: userId,
-      content: formattedContent,
+      content: cleanContent,
       source,
       timestamp: now.toISOString(),
       created_at: now.toISOString(),
@@ -1135,7 +1129,7 @@ export async function executeToolCall(
     };
 
     // Vectorize via Voyage AI
-    const vector = await getEmbedding(formattedContent, env, "document");
+    const vector = await getEmbedding(cleanContent, env, "document");
     const pointId = crypto.randomUUID();
 
     await upsertMemoryPoint(pointId, vector, payload, env);
@@ -1220,12 +1214,17 @@ export async function executeToolCall(
       const similarityScore = Number((item.score || 0).toFixed(4));
 
       if (isRetired) {
-        const classification = classifyHealth(0.0, p.tags || [], p.type || "", true, p.retired_reason || "", p.annotations);
+        const classification = classifyHealth(0.0, p.tags || [], p.type || "", true, p.retired_reason || "", p.annotations, p.source);
         // Severely penalize composite score for retired memories so they rank at the bottom
         const compositeScore = Number((similarityScore * 0.01).toFixed(4));
+        const retiredDisplay = p.content.startsWith("【已废弃/失效归档")
+          ? p.content
+          : `【已废弃/失效归档 (${(p.retired_at || p.timestamp || "").slice(0, 10)}) - 原因: ${p.retired_reason || "无"}】\n${p.content}`;
+
         evaluatedList.push({
           id: item.id,
-          content: p.content,
+          content: retiredDisplay,
+          original_content: p.content.replace(/^【已废弃\/失效归档[^】]*】\s*\n?/, "").replace(/^【来源:[^】]*】\s*\n?/, ""),
           type: p.type,
           source: p.source || undefined,
           source_badge: getSourceBadge(p.source),
@@ -1274,7 +1273,7 @@ export async function executeToolCall(
 
       // 3. Compute Epistemic Health V (t_last_strong is NEVER updated by passive search)
       const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
-      const classification = classifyHealth(V, p.tags || [], p.type || "", false, "", p.annotations);
+      const classification = classifyHealth(V, p.tags || [], p.type || "", false, "", p.annotations, p.source);
 
       // 4. Semantic similarity score & Composite Ranking
       // Composite Score: Semantic score is primary; V modulates confidence (0.6 + 0.4 * V)
@@ -1471,7 +1470,7 @@ export async function executeToolCall(
       if (isRetired && !includeRetired) continue;
 
       if (isRetired) {
-        const classification = classifyHealth(0.0, payload.tags || [], payload.type || "", true, payload.retired_reason || "");
+        const classification = classifyHealth(0.0, payload.tags || [], payload.type || "", true, payload.retired_reason || "", undefined, payload.source);
         timeline.push({
           id: p.id,
           time: payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString("zh-CN", { hour12: false }) : "",
@@ -1500,7 +1499,7 @@ export async function executeToolCall(
       const chDynamic = computeDynamicCh(payload.ch_prior ?? 9.0, decayedH);
       const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
       const V = computeEpistemicHealth(chDynamic, resonantHeat, payload.t_last_strong || nowMs, nowMs);
-      const classification = classifyHealth(V, payload.tags || [], payload.type || "", false, "");
+      const classification = classifyHealth(V, payload.tags || [], payload.type || "", false, "", undefined, payload.source);
 
       timeline.push({
         id: p.id,
@@ -1592,7 +1591,7 @@ export async function executeToolCall(
     }
 
     const newV = computeEpistemicHealth(chDynamic, resonantHeat, nowMs, nowMs);
-    const classification = classifyHealth(newV, p.tags || [], p.type || "", false, "");
+    const classification = classifyHealth(newV, p.tags || [], p.type || "", false, "", undefined, p.source);
 
     return {
       success: true,
@@ -1622,15 +1621,13 @@ export async function executeToolCall(
 
     const pointId = resolved.pointId;
     const p = resolved.payload;
-    const dateTag = now.toISOString().slice(0, 10);
-    let retiredContent = p.content;
-    if (!retiredContent.startsWith("【已废弃/失效归档")) {
-      retiredContent = `【已废弃/失效归档 (${dateTag}) - 原因: ${reason}】\n${p.content}`;
+
+    if (p.retired) {
+      throw new Error(`记忆 [${rawId}] 已处于退役归档状态（原因: "${p.retired_reason || "无"}"，退役时间: ${p.retired_at || "此前"}），无需重复退役。`);
     }
 
-    // Preserve original p.type! Do NOT overwrite with "retired"!
+    // Preserve original p.type and immutable p.content!
     const payloadUpdate: Partial<MemoryPointPayload> & Record<string, any> = {
-      content: retiredContent,
       retired: true,
       retired_at: new Date().toISOString(),
       retired_reason: reason,
@@ -1698,10 +1695,56 @@ export async function executeToolCall(
     const oldPayload = resolved.payload;
     const nowIso = new Date().toISOString();
 
-    // 1. Create a brand new point ID for the new generation
+    // 1. Pre-check: Reject if target is already superseded (causal lineage protection)
+    if (oldPayload.superseded_by) {
+      let currSucc: string | undefined = oldPayload.superseded_by;
+      let latestActiveId: string | null = null;
+      let lastPointId = currSucc;
+      const visited = new Set<string>([oldPointId]);
+      while (currSucc && !visited.has(currSucc) && visited.size < 10) {
+        visited.add(currSucc);
+        lastPointId = currSucc;
+        const pt = await getPointById(currSucc, env);
+        if (!pt || !pt.payload || pt.payload.user_id !== userId) break;
+        if (!pt.payload.retired && pt.payload.status === "active") {
+          latestActiveId = currSucc;
+        }
+        currSucc = pt.payload.superseded_by;
+      }
+      throw new Error(
+        `换代冲突（陈旧/分叉换代）：目标记忆 [${rawId}] 已经发生世代更迭，不可对历史旧版本再次换代。` +
+        (latestActiveId
+          ? `最新活跃世代为 [${latestActiveId}]。请针对最新活跃世代发起 update_memory 请求。`
+          : `后继世代为 [${lastPointId}]（已归档或失效）。若需记录全新事实，请调用 log_memory。`)
+      );
+    }
+
+    // 2. Pre-check: Reject if target is already retired/archived (resurrection protection)
+    if (oldPayload.retired || oldPayload.status === "expired") {
+      throw new Error(
+        `换代被拒绝：目标记忆 [${rawId}] 已处于退役归档状态（退役原因: "${oldPayload.retired_reason || "无"}"，退役时间: ${oldPayload.retired_at || "未知"}）。` +
+        `已退役的记忆严禁换代“复活”！若用户直陈全新事实，请调用 log_memory 建立全新记忆。`
+      );
+    }
+
+    // 3. Snapshot thermal energy, prior, and provenance BEFORE any modifications
+    const baseH = (Array.isArray(oldPayload.h_spectrum) && oldPayload.h_spectrum.length === 7)
+      ? [...oldPayload.h_spectrum]
+      : (oldPayload.type === "entity" ? new Array(7).fill(1.5) : new Array(7).fill(0));
+    const oldChPrior = (typeof oldPayload.ch_prior === "number" && oldPayload.ch_prior > 0)
+      ? oldPayload.ch_prior
+      : (oldPayload.type === "entity" ? 11.5 : 9.0);
+    const inheritedSource: MemorySourceType = oldPayload.source || "user_stated";
+
+    const decayedH = decaySpectrum(baseH, oldPayload.t_last_update || nowMs, nowMs);
+    const nextH = injectIntent(decayedH, 1.0);
+    const chDynamic = computeDynamicCh(oldChPrior, nextH);
+    const resonantHeat = interpolateResonantHeat(nextH, chDynamic);
+
+    // 4. Generate new point ID for the new generation
     const newMemoryId = crypto.randomUUID();
 
-    // 2. Mark old memory as retired + superseded_by newMemoryId + append annotation
+    // 5. Prepare annotation for old memory
     const annotation: MemoryAnnotation = {
       id: crypto.randomUUID(),
       timestamp: nowIso,
@@ -1712,20 +1755,44 @@ export async function executeToolCall(
     const currentAnnotations = Array.isArray(oldPayload.annotations) ? [...oldPayload.annotations] : [];
     currentAnnotations.push(annotation);
 
-    await setPointPayload(oldPointId, {
-      status: "expired",
-      retired: true,
-      retired_at: nowIso,
-      retired_reason: reason,
-      superseded_by: newMemoryId,
-      annotations: currentAnnotations,
-      ch_prior: 0.0,
-      h_spectrum: new Array(7).fill(0),
-      t_last_update: nowMs,
-      t_last_strong: nowMs - 100000000000 // force V to 0 for old point
-    }, env);
+    // 6. Check-And-Set (CAS): Atomically retire old memory IF AND ONLY IF it is still active and not retired
+    await setPointPayloadWithFilter(
+      {
+        must: [
+          { has_id: [oldPointId] },
+          { key: "user_id", match: { value: userId } }
+        ],
+        must_not: [
+          { key: "retired", match: { value: true } },
+          { key: "status", match: { value: "expired" } }
+        ]
+      },
+      {
+        status: "expired",
+        retired: true,
+        retired_at: nowIso,
+        retired_reason: reason,
+        superseded_by: newMemoryId,
+        annotations: currentAnnotations,
+        ch_prior: 0.0,
+        h_spectrum: new Array(7).fill(0),
+        t_last_update: nowMs,
+        t_last_strong: nowMs - 100000000000 // force V to 0 for old point
+      },
+      env
+    );
 
-    // If linked from image, also retire old image point(s) in images collection
+    // 7. CAS Verification: Ensure atomic acquisition succeeded (prevent split-brain under concurrent updates)
+    const verifyOld = await getPointById(oldPointId, env);
+    if (!verifyOld || !verifyOld.payload || verifyOld.payload.superseded_by !== newMemoryId) {
+      const winnerSuccessor = verifyOld?.payload?.superseded_by || "未知";
+      throw new Error(
+        `换代冲突（并发竞争抢占）：目标记忆 [${rawId}] 在并发换代中已被另一请求先行换代（后继世代: [${winnerSuccessor}]）。` +
+        `本次换代操作已自动安全终止，未产生孤儿分叉。`
+      );
+    }
+
+    // 8. If linked from image, also retire old image point(s) in images collection
     const resolvedImageId = resolved.imageId || extractAssociatedImageId(oldPayload);
     if (resolvedImageId) {
       const imgPoints = await findImagePointsByImageId(resolvedImageId, userId, env);
@@ -1747,22 +1814,21 @@ export async function executeToolCall(
       }
     }
 
-    // 3. Compute new vector embedding for the updated content
-    const newVector = await getEmbedding(updatedContent, env, "document");
+    // 9. Compute new vector embedding for the clean updated content
+    const cleanUpdatedContent = updatedContent.replace(/^【来源:[^】]*】\s*\n?/, "").trim();
+    const newVector = await getEmbedding(cleanUpdatedContent, env, "document");
 
-    // 4. Inherit thermal spectrum with decay & intent injection (continuous lineage)
-    const baseH = (Array.isArray(oldPayload.h_spectrum) && oldPayload.h_spectrum.length === 7)
-      ? oldPayload.h_spectrum
-      : (oldPayload.type === "entity" ? new Array(7).fill(1.5) : new Array(7).fill(0));
-    const decayedH = decaySpectrum(baseH, oldPayload.t_last_update || nowMs, nowMs);
-    const nextH = injectIntent(decayedH, 1.0);
-
-    // 5. Preserve revisions audit trail
+    // 10. Preserve revisions audit trail (clean content, no banner prefixes)
     const revisions: NoteRevision[] = Array.isArray(oldPayload.revisions) ? [...oldPayload.revisions] : [];
-    if (oldPayload.content !== updatedContent) {
+    const cleanOldContent = (oldPayload.content || "")
+      .replace(/^【已废弃\/失效归档[^】]*】\s*\n?/, "")
+      .replace(/^【来源:[^】]*】\s*\n?/, "")
+      .trim();
+
+    if (cleanOldContent !== cleanUpdatedContent) {
       revisions.unshift({
         timestamp: nowIso,
-        content: oldPayload.content,
+        content: cleanOldContent,
         title: oldPayload.title,
         entity_name: oldPayload.entity_name,
         aliases: oldPayload.aliases,
@@ -1775,18 +1841,9 @@ export async function executeToolCall(
       }
     }
 
-    // 6. Inherit epistemic provenance
-    const inheritedSource: MemorySourceType = oldPayload.source || "user_stated";
-
-    const chPrior = oldPayload.ch_prior ?? (oldPayload.type === "entity" ? 11.5 : 9.0);
-    const chDynamic = computeDynamicCh(chPrior, nextH);
-    const resonantHeat = interpolateResonantHeat(nextH, chDynamic);
-    const V = computeEpistemicHealth(chDynamic, resonantHeat, nowMs, nowMs);
-    const classification = classifyHealth(V, oldPayload.tags || [], oldPayload.type || "", false, "", undefined);
-
     const newPayload: MemoryPointPayload = {
       user_id: oldPayload.user_id || userId,
-      content: updatedContent,
+      content: cleanUpdatedContent,
       title: oldPayload.title,
       timestamp: nowIso,
       created_at: oldPayload.created_at || oldPayload.timestamp || nowIso,
@@ -1801,7 +1858,7 @@ export async function executeToolCall(
         : (oldPayload.entity_name ? [oldPayload.entity_name, ...(oldPayload.aliases || [])] : []),
       tags: oldPayload.tags || [],
       source: inheritedSource,
-      ch_prior: chPrior,
+      ch_prior: oldChPrior,
       h_spectrum: nextH,
       t_last_update: nowMs,
       t_last_strong: nowMs,
@@ -1819,15 +1876,36 @@ export async function executeToolCall(
       await updateCaseConcerns(userId, oldPointId, "USER-UPDATE", "RESOLVED", "UPDATE", `用户直接调用 update_memory 完成世代更迭: ${reason}`, env);
     }
 
+    // 11. Read back post-write point to verify actual status from database
+    const writtenPoint = await getPointById(newMemoryId, env);
+    const writtenP = writtenPoint?.payload || newPayload;
+    const verifiedDynamicCh = computeDynamicCh(writtenP.ch_prior ?? oldChPrior, writtenP.h_spectrum || nextH);
+    const verifiedResonantHeat = interpolateResonantHeat(writtenP.h_spectrum || nextH, verifiedDynamicCh);
+    const verifiedV = computeEpistemicHealth(
+      verifiedDynamicCh,
+      verifiedResonantHeat,
+      writtenP.t_last_strong || nowMs,
+      nowMs
+    );
+    const verifiedClassification = classifyHealth(
+      verifiedV,
+      writtenP.tags || [],
+      writtenP.type || "",
+      Boolean(writtenP.retired),
+      writtenP.retired_reason || "",
+      writtenP.annotations,
+      writtenP.source || inheritedSource
+    );
+
     return {
       success: true,
       id: newMemoryId,
       predecessor: oldPointId,
-      content: updatedContent,
-      validity: V,
-      status: classification.status,
-      status_badge: classification.badge,
-      message: `🌱 记忆已成功完成世代更迭换代。新世代 [${newMemoryId}] 已完成向量重算与谱系继承；旧世代 [${oldPointId}] 已安全归档退役。`
+      content: cleanUpdatedContent,
+      validity: verifiedV,
+      status: verifiedClassification.status,
+      status_badge: verifiedClassification.badge,
+      message: `🌱 记忆已成功完成世代更迭换代。新世代 [${newMemoryId}] 已完成向量重算与谱系继承（时效健康度: ${verifiedV} | ${verifiedClassification.badge}）；旧世代 [${oldPointId}] 已安全归档退役。`
     };
   }
 
@@ -2110,7 +2188,7 @@ export async function executeToolCall(
       const isRetired = Boolean(p.retired);
 
       if (isRetired) {
-        const classification = classifyHealth(0.0, p.tags || [], "note", true, p.retired_reason || "");
+        const classification = classifyHealth(0.0, p.tags || [], "note", true, p.retired_reason || "", undefined, p.source);
         results.push({
           id: pt.id,
           title: p.title || undefined,
@@ -2139,7 +2217,7 @@ export async function executeToolCall(
       const chDynamic = computeDynamicCh(p.ch_prior ?? 8.8, decayedH);
       const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
       const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
-      const classification = classifyHealth(V, p.tags || [], "note", false, "");
+      const classification = classifyHealth(V, p.tags || [], "note", false, "", undefined, p.source);
 
       results.push({
         id: pt.id,
@@ -3632,7 +3710,7 @@ export async function executeToolCall(
       const chDynamic = computeDynamicCh(chPrior, decayedH);
       const resonantHeat = interpolateResonantHeat(decayedH, chDynamic);
       const V = computeEpistemicHealth(chDynamic, resonantHeat, p.t_last_strong || nowMs, nowMs);
-      const classification = classifyHealth(V, p.tags || [], p.type || "", Boolean(p.retired), p.retired_reason || "", p.annotations);
+      const classification = classifyHealth(V, p.tags || [], p.type || "", Boolean(p.retired), p.retired_reason || "", p.annotations, p.source);
 
       return {
         decayedH,

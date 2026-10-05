@@ -387,7 +387,8 @@ export function classifyHealth(
   type: string = "",
   retired: boolean = false,
   retiredReason: string = "",
-  annotations?: MemoryAnnotation[]
+  annotations?: MemoryAnnotation[],
+  source?: MemorySourceType | string
 ): {
   status: HealthStatus;
   badge: string;
@@ -454,6 +455,10 @@ export function classifyHealth(
     ["preference", "profile", "subjective", "偏好", "习惯", "自陈"].includes(t.toLowerCase())
   );
 
+  const isModelSuggested = source === "model_suggested";
+  const isModelInferred = source === "model_inferred";
+  const isExternal = source === "external";
+
   if (V >= 0.7) {
     if (isUnverified) {
       return wrapResult({
@@ -467,6 +472,27 @@ export function classifyHealth(
         status: "FRESH",
         badge: "🟢 确信偏好 (Fresh / 个人自陈)",
         guidance: "这是用户关于自身偏好或习惯的自述，具有最高权威，可直接采信作为行为准则（但注意可能随时间演化）。"
+      });
+    }
+    if (isModelSuggested) {
+      return wrapResult({
+        status: "FRESH",
+        badge: "💡 模型建议 (Fresh / Model Suggested)",
+        guidance: "这是模型过往提出的建议/提议，处于良好时效期。向用户表达时应保持建议定位，严禁武断定性为用户已确立的既成事实或已定决策！"
+      });
+    }
+    if (isModelInferred) {
+      return wrapResult({
+        status: "FRESH",
+        badge: "🔍 模型推断 (Fresh / Model Inferred)",
+        guidance: "这是模型通过上下文推断出的洞察，处于良好时效期。向用户表达时应注明为推测/推断，严禁视为用户确切直陈的事实！"
+      });
+    }
+    if (isExternal) {
+      return wrapResult({
+        status: "FRESH",
+        badge: "🌐 外部输入 (Fresh / External)",
+        guidance: "这是来自外部数据源或第三方系统的输入。向用户表达时请结合外部信源背景说明。"
       });
     }
     return wrapResult({
@@ -487,6 +513,27 @@ export function classifyHealth(
         status: "DRIFTING",
         badge: "🟡 临界偏好 (Drifting / 偏好演化)",
         guidance: "这是用户的历史偏好或习惯，但已跨越常规讨论周期，人的偏好或习惯可能随时间演化，请在回答时审慎向用户核实。"
+      });
+    }
+    if (isModelSuggested) {
+      return wrapResult({
+        status: "DRIFTING",
+        badge: "🟡 临界建议 (Drifting / Model Suggested)",
+        guidance: "该模型建议已存在较长时间，可能已不合时宜，请审慎向用户核实是否仍有采纳意向。"
+      });
+    }
+    if (isModelInferred) {
+      return wrapResult({
+        status: "DRIFTING",
+        badge: "🟡 临界推断 (Drifting / Model Inferred)",
+        guidance: "该模型推断已跨越常规验证周期，请委婉向用户求证现状。"
+      });
+    }
+    if (isExternal) {
+      return wrapResult({
+        status: "DRIFTING",
+        badge: "🟡 临界外部输入 (Drifting / External)",
+        guidance: "该外部记录已存在较长时间，请审慎核实现状。"
       });
     }
     return wrapResult({

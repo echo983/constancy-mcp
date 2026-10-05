@@ -1,6 +1,6 @@
 {
   "name": "constancy-mcp",
-  "version": "1.9.0",
+  "version": "1.9.1",
   "description": "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server on Cloudflare Workers",
   "main": "src/index.ts",
   "scripts": {

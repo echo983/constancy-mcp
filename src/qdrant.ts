@@ -428,6 +428,25 @@ export async function setPointPayload(
   }
 }
 
+export async function setPointPayloadWithFilter(
+  filter: Record<string, any>,
+  payload: Partial<MemoryPointPayload> & Record<string, any>,
+  env: QdrantEnv
+) {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${COLLECTION_NAME}/points/payload?wait=true`;
+  const res = await qdrantFetch(url, env, {
+    method: "POST",
+    body: JSON.stringify({
+      filter,
+      payload
+    })
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Qdrant setPointPayloadWithFilter error (${res.status}): ${errText}`);
+  }
+}
+
 export async function scrollNotes(
   userId: string,
   tag?: string,
