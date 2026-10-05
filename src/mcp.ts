@@ -215,7 +215,7 @@ export interface McpEnv extends VoyageEnv, QdrantEnv {
   IMAGES?: any;
 }
 
-export const CONSTANCY_VERSION = "1.9.1";
+export const CONSTANCY_VERSION = "1.9.2";
 
 export function generateAgentInitInfo(
   role: string = "chat",
@@ -1697,7 +1697,8 @@ export async function executeToolCall(
 
     // 1. Pre-check: Reject if target is already superseded (causal lineage protection)
     if (oldPayload.superseded_by) {
-      let currSucc: string | undefined = oldPayload.superseded_by;
+      const directSuccId = oldPayload.superseded_by;
+      let currSucc: string | undefined = directSuccId;
       let latestActiveId: string | null = null;
       let lastPointId = currSucc;
       const visited = new Set<string>([oldPointId]);
@@ -1715,7 +1716,7 @@ export async function executeToolCall(
         `换代冲突（陈旧/分叉换代）：目标记忆 [${rawId}] 已经发生世代更迭，不可对历史旧版本再次换代。` +
         (latestActiveId
           ? `最新活跃世代为 [${latestActiveId}]。请针对最新活跃世代发起 update_memory 请求。`
-          : `后继世代为 [${lastPointId}]（已归档或失效）。若需记录全新事实，请调用 log_memory。`)
+          : `直接后继世代为 [${directSuccId}]，链末端世代（已归档）为 [${lastPointId}]。若需记录全新事实，请调用 log_memory。`)
       );
     }
 
@@ -3726,6 +3727,7 @@ export async function executeToolCall(
     const ancestors: Array<{ id: string; payload: MemoryPointPayload }> = [];
     const visitedIds = new Set<string>([targetPointId]);
     let currPred = targetPayload.predecessor;
+    let isUpstreamTruncated = false;
 
     while (currPred && ancestors.length < maxDepth) {
       if (visitedIds.has(currPred)) break; // cycle protection
@@ -3738,11 +3740,15 @@ export async function executeToolCall(
 
       ancestors.unshift({ id: currPred, payload: parentPoint.payload });
       currPred = parentPoint.payload.predecessor;
+      if (ancestors.length >= maxDepth && currPred) {
+        isUpstreamTruncated = true;
+      }
     }
 
     // 3. Trace downstream descendants (successors)
     const descendants: Array<{ id: string; payload: MemoryPointPayload }> = [];
     let currSucc = targetPayload.superseded_by;
+    let isDownstreamTruncated = false;
 
     while (currSucc && descendants.length < maxDepth) {
       if (visitedIds.has(currSucc)) break; // cycle protection
@@ -3755,6 +3761,9 @@ export async function executeToolCall(
 
       descendants.push({ id: currSucc, payload: childPoint.payload });
       currSucc = childPoint.payload.superseded_by;
+      if (descendants.length >= maxDepth && currSucc) {
+        isDownstreamTruncated = true;
+      }
     }
 
     // 4. Assemble full chronological lineage
@@ -3852,7 +3861,12 @@ export async function executeToolCall(
       },
       genealogy: {
         root_id: fullChain[0].id,
-        latest_active_id: fullChain[fullChain.length - 1].id,
+        is_root_truncated: isUpstreamTruncated,
+        latest_active_id: ([...fullChain].reverse().find(n => !n.payload.retired && n.payload.status === "active")?.id) || null,
+        latest_id: fullChain[fullChain.length - 1].id,
+        truncated: isUpstreamTruncated || isDownstreamTruncated,
+        upstream_truncated: isUpstreamTruncated,
+        downstream_truncated: isDownstreamTruncated,
         target_generation: targetGenIndex,
         total_generations: totalGens,
         lineage_chain: lineageSummaries

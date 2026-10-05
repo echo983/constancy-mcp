@@ -269,7 +269,12 @@ export interface InspectMemoryResult {
   };
   genealogy: {
     root_id: string;
-    latest_active_id: string;
+    is_root_truncated?: boolean;
+    latest_active_id: string | null;
+    latest_id: string;
+    truncated?: boolean;
+    upstream_truncated?: boolean;
+    downstream_truncated?: boolean;
     target_generation: number;
     total_generations: number;
     lineage_chain: LineageNodeSummary[];
