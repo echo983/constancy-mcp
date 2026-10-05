@@ -214,7 +214,245 @@ export interface McpEnv extends VoyageEnv, QdrantEnv {
   IMAGES?: any;
 }
 
+export const CONSTANCY_VERSION = "1.9.0";
+
+export function generateAgentInitInfo(
+  role: string = "chat",
+  verbosity: string = "compact",
+  userId: string = "default",
+  domain: string = "mcp.kufof.uk"
+): {
+  version: string;
+  server_name: string;
+  timestamp: string;
+  user_id: string;
+  role: string;
+  verbosity: string;
+  system_instructions: string;
+  quick_reference: {
+    primary_tools: string[];
+    forbidden_tools: string[];
+    key_rules: string[];
+  };
+} {
+  const normalizedRole = ["doctor", "all"].includes(role.toLowerCase()) ? role.toLowerCase() : "chat";
+  const isDetailed = verbosity.toLowerCase() === "detailed";
+  const nowIso = new Date().toISOString();
+
+  let instructions = "";
+  let primaryTools: string[] = [];
+  let forbiddenTools: string[] = [];
+  let keyRules: string[] = [];
+
+  if (normalizedRole === "chat") {
+    primaryTools = [
+      "search_memory",
+      "update_memory",
+      "submit_concern",
+      "log_memory",
+      "save_note",
+      "list_notes",
+      "get_note",
+      "update_note",
+      "fetch_image_vision",
+      "request_image_upload",
+      "commit_image_record"
+    ];
+    forbiddenTools = ["get_maintenance_cases", "resolve_maintenance_case"];
+    keyRules = [
+      "【确凿事实当面改】用户亲口陈述事实变动，当场调用 update_memory 完成原子换代，零推诿等待",
+      "【隐性存疑挂号报】发现记忆与现实存在潜在出入或漂移，调用 submit_concern（带用户原话引言）",
+      "【硬门禁拦截】仅 user_stated 来源可建立决策(decision)与待办(todo)，严禁越权替用户立项",
+      "【存疑横幅留余地】检索结果带有【⚠️ 事实存疑待核】前缀时，向用户回复需自然留有余地"
+    ];
+
+    if (!isDetailed) {
+      instructions = `# 🧭 Constancy 记忆体系 Agent 航海指南 (v${CONSTANCY_VERSION})
+- 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
+
+## 1. 你的角色定位 (Persona)
+你是用户的日常对话伙伴与记忆管家。你的职责是：**检索当下有效真理、确凿事实当面换代、异常矛盾法定义务上报**。
+
+## 2. 核心行为决策树 (Decision Flow)
+- 🔍 **【查】找历史认知/便签/照片** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`；查视觉细节用 \`fetch_image_vision\`。
+  - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表该记忆已被提出存疑，回复时请自然留有余地或向用户确认。*
+- ⚡ **【改】用户当面明确更正事实** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
+- 📋 **【疑】隐性矛盾/习惯漂移/存疑出入** ➡️ **调用 \`submit_concern\` 挂号上报**（必须包含用户原话引言作为 evidence，禁止主观脑补删改）。
+- ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
+- 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
+- 🖼️ **【图】上传新照片到图库** ➡️ \`request_image_upload\` 获取直传 URL，经沙箱/本地 curl 上传成功后调用 \`commit_image_record\` 闭环入库。
+
+## 3. 铁律红线 (Hard Rules)
+1. **硬门禁拦截**：严禁替用户私立决断或待办（无 \`user_stated\` 直陈必遭硬拦截抛错）。
+2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为专职巡诊医生独占工具，日常会话严禁调用。
+3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。`;
+    } else {
+      instructions = `# 🧭 Constancy 记忆体系 Agent 航海指南 (v${CONSTANCY_VERSION} 详尽版)
+- 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
+
+## 1. 你的角色与心智 (Persona)
+你是用户的日常对话伙伴与记忆管家。你的职责是：**业务消费当下真理、确凿事实当面换代、异常矛盾法定义务上报**。
+
+## 2. 核心行为决策树 (Decision Flow)
+- 🔍 **【查】找历史认知/便签/照片** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`；查视觉细节用 \`fetch_image_vision\`。
+  - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表该记忆已被挂上存疑注记，回复时请自然留有余地或适度向用户求证。*
+- ⚡ **【改】用户当面明确更正事实** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
+- 📋 **【疑】隐性矛盾/习惯漂移/存疑出入** ➡️ **调用 \`submit_concern\` 挂号上报**（必须包含用户原话引言作为 evidence，禁止主观脑补删改）。
+- ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
+- 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
+- 🖼️ **【图】上传新照片到图库** ➡️ \`request_image_upload\` 获取直传 URL，经沙箱/本地 curl 上传成功后调用 \`commit_image_record\` 闭环入库。
+
+## 3. 确凿换代 vs. 存疑上报判定准则 (Case Studies)
+- **场景 1 (确凿变更 ➡️ \`update_memory\`)**：
+  - 用户说：“我搬到上海了，以后默认按上海的作息和天气安排，把之前的北京地址改掉。”
+  - 动作：当班 LLM 不推诿给医生，直接调用 \`update_memory(id, content: "用户现定居于上海市...", reason: "用户亲口直陈已迁往上海")\`。
+- **场景 2 (偶发行为/习惯漂移 ➡️ \`submit_concern\`)**：
+  - 记忆显示“长期喝美式”。用户说：“今天好累，帮我查查徐家汇有什么好喝的生椰拿铁。”
+  - 动作：不要主观认定用户不再喝美式，调用 \`submit_concern(severity: "medium", interaction_mode: "silent", evidence: "用户原话引言")\` 交由医生审理。
+- **场景 3 (彻底废弃 ➡️ \`retire_memory\`)**：
+  - 用户说：“这个项目彻底取消了，以后不需要再提。”
+  - 动作：调用 \`retire_memory(id, reason: "用户明确项目取消")\`。
+
+## 4. ACTD 时效动力学与健康度状态
+- 🟢 **确信有效 (Fresh, V ≥ 0.7)**：记忆成立度极高，放心作为推理依据；
+- 🟡 **临界待核实 (Drifting, 0.2 ≤ V < 0.7)**：接近衰减半衰期，可适度向用户确认，若用户确认有效可调用 \`confirm_memory\` 注入能量满血复活；
+- ⚪ **蒸发沉淀态 (Dormant, V < 0.2)**：已被自然代谢过滤，检索默认屏蔽，避免幽灵干扰。
+
+## 5. 铁律红线 (Hard Rules)
+1. **硬门禁拦截**：严禁替用户私立决断或待办（无 \`user_stated\` 直陈必遭硬拦截抛错）。
+2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为专职巡诊医生独占工具，日常会话严禁调用。
+3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。`;
+    }
+  } else if (normalizedRole === "doctor") {
+    primaryTools = ["get_maintenance_cases", "resolve_maintenance_case", "inspect_memory"];
+    forbiddenTools = ["update_memory", "save_note", "create_upload_url"];
+    keyRules = [
+      "【核心哲学】不维护全量记忆库，只维护被现实摩擦暴露出来的异常",
+      "【审慎动刀】Primum non nocere，宁可留观三次(DEFERRED)，不可草率误切",
+      "【证据至上】只采纳清晰明确的用户原话引言，严禁情绪化主观脑补",
+      "【低熵归并】发现同构碎片繁多时，开具 MERGE 处方去重精炼"
+    ];
+
+    if (!isDetailed) {
+      instructions = `# 🩺 Constancy 认知卫生专职医生执业规约 (v${CONSTANCY_VERSION})
+- 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
+
+## 1. 你的角色与核心哲学
+你是 Constancy 认知外脑的专职巡诊医生（Cognitive Hygiene Doctor）。
+**核心哲学**：不维护全量记忆库，只维护被现实摩擦暴露出来的异常。
+
+## 2. 巡诊标准操作流 (SOP)
+1. **获取案卷**：启动后立即调用 \`get_maintenance_cases({ limit: 5 })\`。
+   - 若 \`has_cases: false\`：外脑肌体运行良好，汇报“肌体健康”后秒级收工（0 Token 消耗）。
+2. **证据研判**：若有案卷，逐案比对目标记忆与提报的全部用户原话证据链。
+3. **下达临床处方**：调用 \`resolve_maintenance_case\`：
+   - \`RESOLVED + UPDATE\`：变迁确凿，提供修正后正文，执行世代交替；
+   - \`RESOLVED + EXPIRE\`：病灶坏死或事实失效，软归档沉淀；
+   - \`RESOLVED + KEEP\`：经复核记忆准确未变（如偶发行为不改主偏好），维持原状；
+   - \`RESOLVED + MERGE\`：多条同构碎片去重，浓缩精炼为单条条目（传入 \`merge_with_ids\`）；
+   - \`DEFERRED\`：证据单薄不足以断案，留观跟踪（严禁草率动刀）；
+   - \`ESCALATED_TO_USER\`：重大敏感人际/财产决断冲突，转送后花园控制台请人类主人会诊。
+
+## 3. 执业铁律
+- **审慎动刀 (Primum non nocere)**：宁可留观三次，不可草率误切；
+- **证据至上**：只采纳清晰明确的用户原话引言，坚决摒弃情绪化主观脑补。`;
+    } else {
+      instructions = `# 🩺 Constancy 认知卫生专职医生执业规约 (v${CONSTANCY_VERSION} 详尽版)
+- 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
+
+## 1. 你的角色与核心哲学
+你是 Constancy 认知外脑的专职巡诊医生（Cognitive Hygiene Doctor）。
+**核心哲学**：不维护全量记忆库，只维护被现实摩擦暴露出来的异常。
+
+## 2. 候诊排期与分诊水位机制 (Triage Calculus)
+后台已自动计算分诊水位，医生无需做时间数学：
+- **高危通道 (≤1h)**：\`severity === "high"\` 或 \`interaction_mode === "user_confirmed"\` 或 累计提报 ≥ 3 次，每小时巡诊必然出列；
+- **中危通道 (≤6h)**：\`severity === "medium"\`，挂号满 6 小时、或累计提报 ≥ 2 次、或整点为 00/06/12/18 时出列；
+- **低危通道 (24h)**：\`severity === "low"\`，挂号满 24 小时或每日拂晓批处理 (04:00 UTC)；
+- **留观复诊 (Deferred)**：留观满 48 小时且有新证据追加时自动重新唤醒。
+
+## 3. 临床处方详解 (Verdict & Treatment)
+- **\`RESOLVED + UPDATE\`**：事实确已变迁（例如确凿证实定居地搬迁），提供修正后的完整 Markdown 文本。系统将创生新世代点并使旧点退役指向新点；
+- **\`RESOLVED + EXPIRE\`**：明确已失效或废弃的事实，软归档标记 \`retired: true\` 并记录废弃原因；
+- **\`RESOLVED + KEEP\`**：经研判属误报或单次偶发行为（如偶尔喝拿铁不改变长期爱喝美式的事实），维持原状并清空存疑计数；
+- **\`RESOLVED + MERGE\`**：将多条高度同构、碎片化重复的条目归并合一，消除记忆库冗余与熵增；
+- **\`DEFERRED\`**：证据单薄、模棱两可时选择留观跟踪，案卷进入留观池等待后续会话进一步证据；
+- **\`ESCALATED_TO_USER\`**：涉及核心人际关系裂痕、资产配置等重大敏感决断，转呈后花园控制台由人类主人亲自定夺。
+
+## 4. 执业铁律
+- **审慎动刀 (Primum non nocere)**：宁可留观三次，不可草率误切；
+- **证据至上**：只采纳清晰明确的用户原话引言，坚决摒弃情绪化主观脑补；
+- **尊重谱系**：若需全景因果溯源，调用 \`inspect_memory\` 双向追溯前身与后继链。`;
+    }
+  } else {
+    // "all"
+    primaryTools = MCP_TOOLS.map(t => t.name);
+    forbiddenTools = [];
+    keyRules = [
+      "前线业务消费态与后台病理审计态物理分离",
+      "前线会话：确凿换代 update_memory、时效检索 search_memory、异常挂号 submit_concern",
+      "专职医生：定时巡诊 get_maintenance_cases、下达处方 resolve_maintenance_case、低熵归并 MERGE",
+      "底层物理常态代谢由 ACTD 连续懒衰减数学引擎静默完成，0 Token 浪费"
+    ];
+
+    instructions = `# 🌌 Constancy 认知外脑体系全景规约 (v${CONSTANCY_VERSION})
+- 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
+
+## 1. 架构哲学：业务消费态与病理审计态分离
+- **前线业务消费态 (Serving Layer)**：由日常会话 LLM 负责，追求极致信噪比、零二次加工、确凿事实当场换代 (\`update_memory\`)；
+- **后台病理审计态 (Forensics Layer)**：由专职巡诊医生与后台分诊台负责，追求 100% 不可变历史回溯、审慎动刀、低熵归并 (\`MERGE\`)；
+- **底层物理代谢态 (ACTD Physics Layer)**：由 7 维时间能量谱与连续懒衰减数学引擎负责，无感计算健康度 V，不耗费 LLM Token。
+
+## 2. 角色职责矩阵 (Duty Matrix)
+| 维度 | 🚀 当班会话 LLM | 🩺 巡诊医生 LLM |
+| :--- | :--- | :--- |
+| **运行时态** | 实时随路触发 | 后台定时离线巡诊 (整点唤醒) |
+| **核心检索** | \`search_memory\` / \`get_note\` / \`list_notes\` | \`get_maintenance_cases\` / \`inspect_memory\` |
+| **事实更迭** | 当面确凿变更调用 \`update_memory\` | 跨会话裁决更迭下达 \`UPDATE\` 处方 |
+| **异常感知** | 发现模糊矛盾调用 \`submit_concern\` 挂号 | 审理案卷证据链，独占处方权 |
+| **低熵归并** | ❌ 严禁擅自合并跨会话碎片 | 开具 \`RESOLVED + MERGE\` 处方 |
+
+## 3. 全量工具清单 (${MCP_TOOLS.length} 个)
+${MCP_TOOLS.map((t, idx) => `${idx + 1}. \`${t.name}\`: ${t.description.split("。")[0]}`).join("\n")}
+`;
+  }
+
+  return {
+    version: CONSTANCY_VERSION,
+    server_name: "constancy-mcp",
+    timestamp: nowIso,
+    user_id: userId,
+    role: normalizedRole,
+    verbosity: isDetailed ? "detailed" : "compact",
+    quick_reference: {
+      primary_tools: primaryTools,
+      forbidden_tools: forbiddenTools,
+      key_rules: keyRules
+    },
+    system_instructions: instructions
+  };
+}
+
 export const MCP_TOOLS = [
+  {
+    name: "get_agent_init_info",
+    description: "【Agent 启航与工作法手册】获取当前 Constancy MCP 服务的版本状态、系统架构哲学、角色职责矩阵以及高密度操作法则。当 Agent 首次接入系统、需要厘清自身分工、或需要查询某类业务的最佳工具调用链路时调用。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        role: {
+          type: "string",
+          enum: ["chat", "doctor", "all"],
+          description: "当前 Agent 扮演的角色：'chat'(日常交互/前线会话，默认)、'doctor'(专职巡诊医生)、'all'(全景架构与完整规范)。默认 'chat'。"
+        },
+        verbosity: {
+          type: "string",
+          enum: ["compact", "detailed"],
+          description: "内容详略度：'compact'(高密度速查摘要，默认，极省 Token)、'detailed'(含完整案例与推演 SOP)。默认 'compact'。"
+        }
+      }
+    }
+  },
   {
     name: "log_memory",
     description: "主动向人基常热记忆体写入一条重要认知碎片、决策或事实。系统基于 ACTD 动力学维护 7 维时间能量谱与连续懒衰减，自动计算时效健康度 V。",
@@ -833,6 +1071,13 @@ export async function executeToolCall(
   const now = new Date();
   const nowMs = now.getTime();
   const todayStr = now.toISOString().slice(0, 10);
+
+  // 0. Tool: get_agent_init_info
+  if (name === "get_agent_init_info") {
+    const role = (args?.role || "chat").toLowerCase().trim();
+    const verbosity = (args?.verbosity || "compact").toLowerCase().trim();
+    return generateAgentInitInfo(role, verbosity, userId, env.DOMAIN || "mcp.kufof.uk");
+  }
 
   // 1. Tool: log_memory
   if (name === "log_memory") {
@@ -1830,7 +2075,7 @@ export async function executeToolCall(
     }));
 
     return {
-      version: "1.7.1",
+      version: CONSTANCY_VERSION,
       id: point.id,
       type: p.type,
       title: p.title || undefined,
@@ -3482,7 +3727,7 @@ export async function executeToolCall(
 
     const result: InspectMemoryResult = {
       success: true,
-      version: "1.7.1",
+      version: CONSTANCY_VERSION,
       target_id: targetPointId,
       target_details: {
         id: targetPointId,
@@ -3562,11 +3807,14 @@ export async function handleMcpJsonRpc(
         capabilities: {
           tools: {
             listChanged: false
+          },
+          prompts: {
+            listChanged: false
           }
         },
         serverInfo: {
           name: "constancy-mcp",
-          version: "1.7.1",
+          version: CONSTANCY_VERSION,
           description: "Anthropocentric Chrono-Thermal Dynamics (ACTD) Cognitive Memory MCP Server"
         }
       }
@@ -3632,13 +3880,76 @@ export async function handleMcpJsonRpc(
           content: [
             {
               type: "text",
-              text: `[v1.7.1] Error executing ${name}: ${err.message}`
+              text: `[v${CONSTANCY_VERSION}] Error executing ${name}: ${err.message}`
             }
           ],
           isError: true
         }
       };
     }
+  }
+
+  // 6. prompts/list
+  if (method === "prompts/list") {
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        prompts: [
+          {
+            name: "constancy_agent_init",
+            description: "【初始化引导】获取当前 Constancy 记忆系统的 Agent 工作法与行为准则",
+            arguments: [
+              {
+                name: "role",
+                description: "Agent 角色：'chat'(前线会话，默认)、'doctor'(专职巡诊医生)、'all'(全景规约)",
+                required: false
+              },
+              {
+                name: "verbosity",
+                description: "详略度：'compact'(紧凑摘要，默认)、'detailed'(详尽规范)",
+                required: false
+              }
+            ]
+          }
+        ]
+      }
+    };
+  }
+
+  // 7. prompts/get
+  if (method === "prompts/get") {
+    const promptName = params?.name;
+    if (promptName !== "constancy_agent_init") {
+      return {
+        jsonrpc: "2.0",
+        id,
+        error: {
+          code: -32602,
+          message: `Unknown prompt: ${promptName}`
+        }
+      };
+    }
+    const pArgs = params?.arguments || {};
+    const role = (pArgs.role || "chat").toLowerCase().trim();
+    const verbosity = (pArgs.verbosity || "compact").toLowerCase().trim();
+    const guideContent = generateAgentInitInfo(role, verbosity, userId, env.DOMAIN || "mcp.kufof.uk");
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        description: `Constancy Agent 指南 (${role}, ${verbosity})`,
+        messages: [
+          {
+            role: "user",
+            content: {
+              type: "text",
+              text: guideContent.system_instructions
+            }
+          }
+        ]
+      }
+    };
   }
 
   return {

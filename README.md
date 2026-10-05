@@ -78,42 +78,50 @@ graph TD
 
 通过标准 Model Context Protocol 提供给 Claude / Cursor 等 AI Agent：
 
-1. `log_memory(content, c_h?, type?, entities?, tags?, source?)`  
+1. `get_agent_init_info(role?, verbosity?)`  
+   * **【🧭 Agent 启航与工作法手册】**：获取服务端版本、架构哲学、角色职责矩阵（前线业务 vs. 专职医生）与高密度操作法则。支持 `role: "chat" | "doctor" | "all"` 与 `verbosity: "compact" | "detailed"`。同时注册为 MCP Native Prompt (`constancy_agent_init`)。
+2. `log_memory(content, c_h?, type?, entities?, tags?, source?)`  
    * 主动打点记事。必须显式定性认知来源（`user_stated` / `model_suggested` / `model_inferred` / `external`），内置硬门禁：严禁模型越权替用户设立待办或决策。自动维护 7 维时间能量谱与衰减周期。
-2. `search_memory(query?, limit?, type?, entity?, min_validity?, include_retired?, image_url?, image_base64?, date_from?, date_to?, near?)`  
-   * 多模态语义检索 + ACTD 连续懒衰减时效仲裁 + Qdrant 原生时空结构化过滤。基于 `voyage-multimodal-3.5` 统一度量衡，支持纯文本、以图搜图、图文联合及纯时间/地理范围过滤。内置图片与关联便签动态去重，返回带情商指示牌与动力学指标的记忆卡片。
-3. `get_daily_timeline(date, include_retired?)`  
+3. `search_memory(query?, limit?, type?, entity?, min_validity?, include_retired?, image_url?, image_base64?, date_from?, date_to?, near?)`  
+   * 多模态语义检索 + ACTD 连续懒衰减时效仲裁 + Qdrant 原生时空结构化过滤。基于 `voyage-multimodal-3.5` 统一度量衡，支持纯文本、以图搜图、图文联合及纯时间/地理范围过滤。内置图片与关联便签动态去重，遇到存疑记忆自动前置 `【⚠️ 事实存疑待核】` 警示横幅。
+4. `get_daily_timeline(date, include_retired?)`  
    * 按时间顺序提取某一天全部碎片与动力学热度指标 ($C_H$、健康度 $V$、状态标签)，供大模型生成每日研发日记（DevLog）与夜间蒸馏。
-4. `confirm_memory(id, note?, c_h?, revive?)`  
+5. `confirm_memory(id, note?, c_h?, revive?)`  
    * **🟡 状态闭环工具**：当用户核实某条临界记忆依然有效时调用，强信号刷新验证时间戳并注入热度，使记忆满血重归 🟢 确信有效。若记忆已废弃，可传入 `revive: true` 撤销废弃复活。
-5. `retire_memory(id, reason)`  
+6. `retire_memory(id, reason)`  
    * **抗熵归档工具**：显式设置 `retired: true`，保留原业务分类 `type`，将已过时或已被推翻的记忆标记失效沉淀 ($V \to 0$)，杜绝死灰复燃。
-6. `upsert_entity(name, description, aliases?, relations?)`  
+7. `update_memory(id, content, reason?)`  
+   * **【⚡ 事实更迭/原子世代换代】**：当用户当面明确更正事实时调用。安全退役旧版本（软归档保留不可变审计），以修正后的新内容生成新世代记忆并即时重算 1024 维向量嵌入，平滑继承前身谱系能量与 $C_H$。确保后续检索 100% 准确命中新事实，零模型歧义与零递归开销。
+8. `upsert_entity(name, description, aliases?, relations?)`  
    * 维护跨越周期的高阶常青实体百科清单 ($C_H \ge 11.0$)。
-7. `save_note(content, title?, base64?, mime_type?, c_h?, tags?)`  
+9. `save_note(content, title?, base64?, mime_type?, c_h?, tags?)`  
    * **极简记事本/客观存根**：专为“书记官记录”（用户交代“帮我记着点……”）与“LLM 工具性存根”（URI、代码片段、数据指纹）设计，原汁原味保存（上限 10KB），绝不作有损改写。支持可选的独立 BASE64 槽（上限 10KB，若为图片则自动送入 Voyage-Multimodal-3.5 进行图文混合特征对齐，自动计算服务端 SHA-256 校验和），默认常度 8.8（配置/速查类自动为 11.0）。
-8. `get_note(id)`  
-   * **按需载荷与审计追溯**：根据便签 ID 精确取回完整原始内容、Base64 载荷、SHA-256 校验和及历史修改审计链 (`revisions`)。
-9. `list_notes(tag?, limit?, include_retired?)`  
-   * **确定性标签枚举**：基于 Qdrant scroll 物理枚举便签与客观存根（非向量相似度检索，杜绝阈值截断漏选）。适用于“我有哪些待办”、“列出所有配置存根”等枚举场景。
-10. `update_note(id, content?, mode?, title?, tags?, base64?, mime_type?, c_h?)`  
+10. `get_note(id)`  
+    * **按需载荷与审计追溯**：根据便签 ID 精确取回完整原始内容、Base64 载荷、SHA-256 校验和及历史修改审计链 (`revisions`)。
+11. `list_notes(tag?, limit?, include_retired?)`  
+    * **确定性标签枚举**：基于 Qdrant scroll 物理枚举便签与客观存根（非向量相似度检索，杜绝阈值截断漏选）。适用于“我有哪些待办”、“列出所有配置存根”等枚举场景。
+12. `update_note(id, content?, mode?, title?, tags?, base64?, mime_type?, c_h?)`  
     * **版本可追溯编辑**：修改便签内容（支持覆盖与追加模式）、分类标签或常度。修改时自动归档历史版本快照至 `revisions` 审计链（最多保留 5 版）；内容、标题或图片改动时自动触发 Voyage-Multimodal-3.5 重算语义向量。
-11. `get_blob_url(id)`  
+13. `get_blob_url(id)`  
     * **Capability 下载链接生成**：为便签中存储的二进制数据生成 5 分钟带签名下载链接。供客户端或 Claude 代码沙箱通过 `curl` 直接下载，完全避免大段 Base64 经过 LLM 对话上下文消耗 Token 或产生截断转义损耗。
-12. `create_upload_url(title?, content?, mime_type?, tags?, c_h?)`  
+14. `fetch_image_vision(id, variant?, include_metadata?)`  
+    * **【👁️ 视觉直读】**：将图库中的指定图片以图像形式直接载入模型视觉通道，支持 `ai512`（极速省 Token 粗筛）、`ai768`（通用推荐）、`ai1024`（密集文本与复杂图表），无需沙箱下载。
+15. `create_upload_url(title?, content?, mime_type?, tags?, c_h?)`  
     * **Capability 直传链接生成**：预分配便签 ID 并生成 5 分钟带签名直接上传链接。允许客户端或 Claude 沙箱通过 `curl -X PUT` 直接将二进制流存入，完全不经过 LLM 对话上下文传输 Base64。
-13. `request_image_upload(filename?, captured_at?, c_h?, tags?)`  
+16. `request_image_upload(filename?, captured_at?, c_h?, tags?)`  
     * **图片上传流水线（阶段一）**：预分配全局唯一图片 ID，生成直传至 Cloudflare Images 的带签名上传链接与一键直传 curl 命令，实现大文件零 Token 消耗入库。
-14. `commit_image_record(image_id, description, c_h?, tags?, captured_at?, location?, exif?)`  
+17. `commit_image_record(image_id, description, c_h?, tags?, captured_at?, location?, exif?)`  
     * **图片入库与多模态索引（阶段二）**：在直传完成后调用，由大模型深度观察图像细节生成高信噪比描述，注入 EXIF 拍摄时间与 GPS 经纬度，自动调用 Voyage-Multimodal-3.5 计算视觉向量并建立 Qdrant 索引与关联便签。
-15. `annotate_memory(id, kind, text, source?, ref_id?)`  
+18. `annotate_memory(id, kind, text, source?, ref_id?)`  
     * **非破坏性勘误与附注**：对既有记忆进行事实更正（`correction`）、存疑标记（`dispute`）或补充上下文（`context`）。原文与时空向量一字不动，保证因果可证伪性；后续检索自动挂载更正警示牌并置展示，彻底杜绝历史被涂抹带来的认知失真。
-16. `submit_concern(memory_id, reason, evidence, severity?, interaction_mode?)`  
+19. `submit_concern(memory_id, reason, evidence, severity?, interaction_mode?)`  
     * **门诊异常主诉（日常 LLM 义务工具）**：当对话中发现旧记忆与现实明显冲突、过期或失真时，日常 LLM 有义务调用此工具提交病症顾虑并附带用户原话证据。支持静默 (`silent`)、顺带告知 (`informed_user`)、确认后再报 (`user_confirmed`) 三档姿态。
-17. `get_maintenance_cases(limit?)`  
+20. `get_maintenance_cases(limit?)`  
     * **🩺 巡诊分诊案卷获取（医生专用）**：供专职巡诊医生（Scheduled Task Claude）每小时整点唤醒调用。私域分诊台自动完成 1h/6h/24h 窗口计算与案卷聚合，无任务时秒级退出，零无效 Token 消耗。**严禁日常对话模型调用**。
-18. `resolve_maintenance_case(case_id, memory_id, verdict, treatment?, updated_content?, doctor_notes?)`  
-    * **🩺 临床处方与世代更迭（医生专用）**：医生完成研判后下达处方，支持维持(`KEEP`)、世代更新(`UPDATE`，旧记忆退休并指向新纪元，新记忆入库并继承谱系)、失效归档(`EXPIRE`)、留观跟踪(`DEFERRED`)或转送用户会诊(`ESCALATED_TO_USER`)。**严禁日常对话模型调用**。
+21. `resolve_maintenance_case(case_id, memory_id, verdict, treatment?, updated_content?, doctor_notes?)`  
+    * **🩺 临床处方与世代更迭（医生专用）**：医生完成研判后下达处方，支持维持(`KEEP`)、世代更新(`UPDATE`，旧记忆退休并指向新纪元，新记忆入库并继承谱系)、失效归档(`EXPIRE`)、同构精炼归并(`MERGE`)、留观跟踪(`DEFERRED`)或转送用户会诊(`ESCALATED_TO_USER`)。**严禁日常对话模型调用**。
+22. `inspect_memory(id, max_depth?)`  
+    * **【🔬 认知基因透视/因果验血】**：按 ID 精确获取记忆底层元数据（7维时间谱、健康度 V、revisions 与 annotations），双向递归追溯 `predecessor` 前身链与 `superseded_by` 后继链，完整呈现世代全景因果拓扑图。纯只读诊断，零热力学扰动。
 ---
 
 ## 🏗️ 飞轮运作流：白天打点，夜间蒸馏，长波自愈
