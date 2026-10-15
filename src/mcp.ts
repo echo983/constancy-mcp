@@ -264,7 +264,6 @@ export function generateAgentInitInfo(
       "request_image_upload",
       "commit_image_record",
       "post_proactive_agenda",
-      "check_proactive_agenda",
       "resolve_proactive_agenda"
     ];
     forbiddenTools = ["get_maintenance_cases", "resolve_maintenance_case"];
@@ -272,7 +271,8 @@ export function generateAgentInitInfo(
       "【确凿事实当面改】用户亲口陈述事实变动，当场调用 update_memory 完成原子换代，零推诿等待",
       "【隐性存疑挂号报】发现记忆与现实存在潜在出入或漂移，调用 submit_concern（带用户原话引言）",
       "【硬门禁拦截】仅 user_stated 来源可建立决策(decision)与待办(todo)，严禁越权替用户立项",
-      "【存疑横幅留余地】检索结果带有【⚠️ 事实存疑待核】前缀时，向用户回复需自然留有余地"
+      "【存疑横幅留余地】检索结果带有【⚠️ 事实存疑待核】前缀时，向用户回复需自然留有余地",
+      "【主动通信分工】check_proactive_agenda 专供后台定时任务轮询，日常会话若用户未明确指示查待办切勿调用；需稍后跟进事项调用 post_proactive_agenda，聊完调用 resolve_proactive_agenda 结案"
     ];
 
     if (!isDetailed) {
@@ -295,7 +295,8 @@ export function generateAgentInitInfo(
 ## 3. 铁律红线 (Hard Rules)
 1. **硬门禁拦截**：严禁替用户私立决断或待办（无 \`user_stated\` 直陈必遭硬拦截抛错）。
 2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为专职巡诊医生独占工具，日常会话严禁调用。
-3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。`;
+3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。
+4. **主动通信分工**：\`check_proactive_agenda\` 专供后台每小时定时任务轮询，日常前线会话若用户未明确指示查待办请勿随意调用；遇到需要稍后主动跟进的事项随时调用 \`post_proactive_agenda\` 投递便签，聊完调用 \`resolve_proactive_agenda\` 结案。`;
     } else {
       instructions = `# 🧭 Constancy 记忆体系 Agent 航海指南 (v${CONSTANCY_VERSION} 详尽版)
 - 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
@@ -311,6 +312,7 @@ export function generateAgentInitInfo(
 - ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
 - 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
 - 🖼️ **【图】上传新照片到图库** ➡️ \`request_image_upload\` 获取直传 URL，经沙箱/本地 curl 上传成功后调用 \`commit_image_record\` 闭环入库。
+- 💬 **【议】主动待办中枢** ➡️ 需要稍后向用户主动沟通的事项调用 \`post_proactive_agenda\`；定时任务每小时调用 \`check_proactive_agenda\` 轮询；聊完调用 \`resolve_proactive_agenda\` 结案。
 
 ## 3. 确凿换代 vs. 存疑上报判定准则 (Case Studies)
 - **场景 1 (确凿变更 ➡️ \`update_memory\`)**：
@@ -331,8 +333,32 @@ export function generateAgentInitInfo(
 ## 5. 铁律红线 (Hard Rules)
 1. **硬门禁拦截**：严禁替用户私立决断或待办（无 \`user_stated\` 直陈必遭硬拦截抛错）。
 2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为专职巡诊医生独占工具，日常会话严禁调用。
-3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。`;
+3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。
+4. **主动通信分工**：\`check_proactive_agenda\` 专供后台每小时定时任务轮询，日常前线会话若用户未明确指示查待办请勿随意调用；遇到需要稍后主动跟进的事项随时调用 \`post_proactive_agenda\` 投递便签，聊完调用 \`resolve_proactive_agenda\` 结案。`;
     }
+  } else if (normalizedRole === "scheduled" || normalizedRole === "patrol") {
+    primaryTools = ["check_proactive_agenda", "resolve_proactive_agenda", "post_proactive_agenda"];
+    forbiddenTools = ["update_memory", "save_note", "get_maintenance_cases", "resolve_maintenance_case"];
+    keyRules = [
+      "【整点巡查】启动后立即调用 check_proactive_agenda 检查待议池",
+      "【绝对静默】若 has_agenda 为 false，必须保持完全静默，不向用户发任何消息直接收工（0 骚扰）",
+      "【得体沟通】若 has_agenda 为 true，结合当下时间与情境主动发起交谈，并在处理完毕后调用 resolve_proactive_agenda 结案"
+    ];
+
+    instructions = `# ⏰ Constancy 定时巡查专属执业规约 (v${CONSTANCY_VERSION})
+- 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
+
+## 1. 你的角色与核心使命
+你是主人的后台定时巡查管家，专职在后台定时任务（如每小时整点）唤醒时巡查待议池。
+
+## 2. 标准巡检流程 (SOP)
+1. **检查待办**：启动后立即调用 \`check_proactive_agenda()\`；
+2. **静默判定**：
+   - 若 \`has_agenda: false\`：待议箱为空。⚠️ **绝对静默铁律**：你必须保持完全静默，不要向用户输出任何文字或气泡，直接安静结束本轮任务（0 骚扰）！
+3. **主动沟通**：
+   - 若 \`has_agenda: true\`：结合当下时间与情境，主动以精简、得体的语气向用户陈述背景与需确认的问题；
+4. **闭环结案**：
+   - 当用户在后续回复中处理完毕后，务必调用 \`resolve_proactive_agenda\` 进行销账或延期。`;
   } else if (normalizedRole === "doctor") {
     primaryTools = ["get_maintenance_cases", "resolve_maintenance_case", "inspect_memory"];
     forbiddenTools = ["update_memory", "save_note", "create_upload_url"];
@@ -1070,7 +1096,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "post_proactive_agenda",
-    description: "【主动通信待议便签】向主动通信待议箱提交一条待沟通事项。供外部定时任务（如 Fastmail 邮件巡检）、日常会话待办或巡诊医生跨会话投递。支持设置紧急程度、预约延后时间与去重键（相同 dedup_key 自动合并更新）。",
+    description: "【📥 全角色通用 - 主动通信待议投递】向待议箱提交一条待沟通事项。任何会话（外部定时巡检如 Fastmail 邮件维护、日常前线会话记录未来待办、或巡诊医生）均可自由跨会话投递。支持设置紧急程度 (urgent)、延迟提醒时间 (schedule_after) 与去重键 (dedup_key，相同 key 自动合并更新防刷）。",
     inputSchema: {
       type: "object",
       properties: {
@@ -1100,7 +1126,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "check_proactive_agenda",
-    description: "【主动通信待议巡查】专供客户端定时任务（如每小时整点任务）轮询调用。拉取当前有效且待沟通的事项列表。若 has_agenda 为 false，调用方应保持完全静默直接收工。",
+    description: "【⏰ 客户端定时任务专享 - 普通日常会话请勿随意轮询】专供后台每小时定时任务（Scheduled Tasks / Cron）唤醒时轮询待议池。拉取当前有效且待沟通的事项列表。若 has_agenda 为 false，调用方必须保持完全静默直接收工，严禁向用户发送无意义问候。日常闲聊对话中若用户未明确要求查待办切勿调用。",
     inputSchema: {
       type: "object",
       properties: {
@@ -1113,7 +1139,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "resolve_proactive_agenda",
-    description: "【主动通信待议核销】核销或更新主动通信议题状态。当已与用户沟通完成、用户明确表示无需再提时标记为 'done'；若用户要求稍后提醒则标记为 'snooze' 并指定 snooze_until。",
+    description: "【✅ 闭环核销 - 主动通信议题办结/延期】核销或更新主动通信议题状态。当当班会话已与用户完成该事项沟通、用户明确表示无需再提时标记为 'done'；若用户要求稍后提醒则标记为 'snooze' 并指定 snooze_until。",
     inputSchema: {
       type: "object",
       properties: {
