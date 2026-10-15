@@ -144,6 +144,23 @@ export interface DoctorCase {
   diagnostic_hint: string;
 }
 
+// ==================== Proactive Agenda Architecture ====================
+export type AgendaStatus = "pending" | "done" | "snoozed";
+
+export interface ProactiveAgendaPayload {
+  id: string;                      // 议题唯一标识 UUID
+  user_id: string;                 // 用户标识
+  title: string;                   // 议题标题
+  content: string;                 // 议题内容（背景上下文、邮件摘要、需确认事项）
+  urgent?: boolean;                // 是否紧急 (默认 false)
+  status: AgendaStatus;            // 状态: pending | done | snoozed
+  dedup_key?: string;              // 业务去重标识
+  schedule_after?: string;         // 预约延后触发时间 (ISO 8601 UTC)
+  resolution_note?: string;        // 结案/延期纪要
+  created_at: string;              // 创建时间 ISO 8601 UTC
+  updated_at: string;              // 更新时间 ISO 8601 UTC
+}
+
 export type HealthStatus = "FRESH" | "DRIFTING" | "DORMANT";
 
 export interface EvaluatedMemory {

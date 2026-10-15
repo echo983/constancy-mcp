@@ -22,7 +22,9 @@ import {
   ConcernSeverity,
   InteractionMode,
   InspectMemoryResult,
-  LineageNodeSummary
+  LineageNodeSummary,
+  ProactiveAgendaPayload,
+  AgendaStatus
 } from "./actd";
 import { getEmbedding, VoyageEnv } from "./voyage";
 import {
@@ -51,7 +53,10 @@ import {
   QdrantEnv,
   submitConcernToQdrant,
   getDoctorTriageCases,
-  updateCaseConcerns
+  updateCaseConcerns,
+  postAgendaToQdrant,
+  getPendingAgendasFromQdrant,
+  resolveAgendaInQdrant
 } from "./qdrant";
 import { computeBase64Sha256, generateBlobSig } from "./blob";
 
@@ -215,7 +220,7 @@ export interface McpEnv extends VoyageEnv, QdrantEnv {
   IMAGES?: any;
 }
 
-export const CONSTANCY_VERSION = "1.9.2";
+export const CONSTANCY_VERSION = "1.10.0";
 
 export function generateAgentInitInfo(
   role: string = "chat",
@@ -257,7 +262,10 @@ export function generateAgentInitInfo(
       "update_note",
       "fetch_image_vision",
       "request_image_upload",
-      "commit_image_record"
+      "commit_image_record",
+      "post_proactive_agenda",
+      "check_proactive_agenda",
+      "resolve_proactive_agenda"
     ];
     forbiddenTools = ["get_maintenance_cases", "resolve_maintenance_case"];
     keyRules = [
@@ -282,6 +290,7 @@ export function generateAgentInitInfo(
 - ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
 - 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
 - 🖼️ **【图】上传新照片到图库** ➡️ \`request_image_upload\` 获取直传 URL，经沙箱/本地 curl 上传成功后调用 \`commit_image_record\` 闭环入库。
+- 💬 **【议】主动待办中枢** ➡️ 需要稍后向用户主动沟通的事项调用 \`post_proactive_agenda\`；定时任务每小时调用 \`check_proactive_agenda\` 轮询；聊完调用 \`resolve_proactive_agenda\` 结案。
 
 ## 3. 铁律红线 (Hard Rules)
 1. **硬门禁拦截**：严禁替用户私立决断或待办（无 \`user_stated\` 直陈必遭硬拦截抛错）。
@@ -1057,6 +1066,76 @@ export const MCP_TOOLS = [
         }
       },
       required: ["id"]
+    }
+  },
+  {
+    name: "post_proactive_agenda",
+    description: "【主动通信待议便签】向主动通信待议箱提交一条待沟通事项。供外部定时任务（如 Fastmail 邮件巡检）、日常会话待办或巡诊医生跨会话投递。支持设置紧急程度、预约延后时间与去重键（相同 dedup_key 自动合并更新）。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "议题标题（简短精准，如'Q3个税申报待签字'、'东航机票变动确认'）"
+        },
+        content: {
+          type: "string",
+          description: "议题详细内容：背景上下文、邮件摘要、需用户确认或决断的事项"
+        },
+        urgent: {
+          type: "boolean",
+          description: "可选。是否紧急事项（默认 false）。紧急事项在轮询拉取时优先排序"
+        },
+        dedup_key: {
+          type: "string",
+          description: "可选。业务去重键（如邮件 Message-ID、日历 Event-ID）。若存在相同 key 的未结议题则合并更新，防止重复投递"
+        },
+        schedule_after: {
+          type: "string",
+          description: "可选。预约延后触发时间 (ISO 8601 UTC)。在此时间之前 check_proactive_agenda 不会拉取该议题"
+        }
+      },
+      required: ["title", "content"]
+    }
+  },
+  {
+    name: "check_proactive_agenda",
+    description: "【主动通信待议巡查】专供客户端定时任务（如每小时整点任务）轮询调用。拉取当前有效且待沟通的事项列表。若 has_agenda 为 false，调用方应保持完全静默直接收工。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "number",
+          description: "单次拉取最大议题数，默认 5（按紧急度与创建时间降序）"
+        }
+      }
+    }
+  },
+  {
+    name: "resolve_proactive_agenda",
+    description: "【主动通信待议核销】核销或更新主动通信议题状态。当已与用户沟通完成、用户明确表示无需再提时标记为 'done'；若用户要求稍后提醒则标记为 'snooze' 并指定 snooze_until。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agenda_id: {
+          type: "string",
+          description: "议题 UUID"
+        },
+        status: {
+          type: "string",
+          enum: ["done", "snooze"],
+          description: "目标状态：'done'(办结/移出待议箱)、'snooze'(延期稍后提醒)"
+        },
+        snooze_until: {
+          type: "string",
+          description: "当 status 为 'snooze' 时必填：指定延后唤醒的时间 (ISO 8601 UTC)"
+        },
+        note: {
+          type: "string",
+          description: "可选。处置纪要（简记用户决断或延期原因）"
+        }
+      },
+      required: ["agenda_id", "status"]
     }
   }
 ];
@@ -3875,6 +3954,103 @@ export async function executeToolCall(
     };
 
     return result;
+  }
+
+  // 19. Tool: post_proactive_agenda
+  if (name === "post_proactive_agenda") {
+    const title = (args?.title || "").trim();
+    if (!title) throw new Error("Missing required argument: title");
+    const content = (args?.content || "").trim();
+    if (!content) throw new Error("Missing required argument: content");
+
+    const urgent = Boolean(args?.urgent);
+    const dedupKey = args?.dedup_key ? String(args.dedup_key).trim() : undefined;
+    let scheduleAfter: string | undefined = undefined;
+    if (args?.schedule_after) {
+      const parsed = new Date(args.schedule_after);
+      if (isNaN(parsed.getTime())) {
+        throw new Error("Invalid schedule_after format. Must be a valid ISO 8601 date string.");
+      }
+      scheduleAfter = parsed.toISOString();
+    }
+
+    const agendaId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+
+    const agendaPayload: ProactiveAgendaPayload = {
+      id: agendaId,
+      user_id: userId,
+      title,
+      content,
+      urgent,
+      status: "pending",
+      dedup_key: dedupKey,
+      schedule_after: scheduleAfter,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+
+    const qdrantEnv: QdrantEnv = {
+      QDRANT_URL: env.QDRANT_URL,
+      QDRANT_API_KEY: env.QDRANT_API_KEY
+    };
+
+    const res = await postAgendaToQdrant(agendaPayload, qdrantEnv);
+    return {
+      agenda_id: res.agenda_id,
+      status: res.status,
+      is_new: res.is_new,
+      dedup_action: res.dedup_action,
+      message: res.is_new
+        ? `待议事项 [${res.agenda_id}] 已成功提交至待议箱。`
+        : `待议事项 [${res.agenda_id}] 与既有未结案议题 (dedup_key: ${dedupKey}) 匹配，已合并更新。`
+    };
+  }
+
+  // 20. Tool: check_proactive_agenda
+  if (name === "check_proactive_agenda") {
+    const limit = Math.min(Math.max(Number(args?.limit) || 5, 1), 20);
+
+    const qdrantEnv: QdrantEnv = {
+      QDRANT_URL: env.QDRANT_URL,
+      QDRANT_API_KEY: env.QDRANT_API_KEY
+    };
+
+    const res = await getPendingAgendasFromQdrant(userId, limit, qdrantEnv);
+    return res;
+  }
+
+  // 21. Tool: resolve_proactive_agenda
+  if (name === "resolve_proactive_agenda") {
+    const agendaId = (args?.agenda_id || "").trim();
+    if (!agendaId) throw new Error("Missing required argument: agenda_id");
+
+    const status = (args?.status || "").trim().toLowerCase();
+    if (status !== "done" && status !== "snooze") {
+      throw new Error("Invalid status. Must be 'done' or 'snooze'.");
+    }
+
+    let snoozeUntil: string | undefined = undefined;
+    if (status === "snooze") {
+      if (!args?.snooze_until) {
+        throw new Error("Missing required argument 'snooze_until' when status is 'snooze'. Must be an ISO 8601 date string.");
+      }
+      const parsed = new Date(args.snooze_until);
+      if (isNaN(parsed.getTime())) {
+        throw new Error("Invalid snooze_until format. Must be a valid ISO 8601 date string.");
+      }
+      snoozeUntil = parsed.toISOString();
+    }
+
+    const note = args?.note ? String(args.note).trim() : undefined;
+
+    const qdrantEnv: QdrantEnv = {
+      QDRANT_URL: env.QDRANT_URL,
+      QDRANT_API_KEY: env.QDRANT_API_KEY
+    };
+
+    const res = await resolveAgendaInQdrant(userId, agendaId, status as "done" | "snooze", snoozeUntil, note, qdrantEnv);
+    return res;
   }
 
   throw new Error(`Unknown tool: ${name}`);

@@ -10,7 +10,9 @@ import {
   DoctorVerdict,
   DoctorTreatment,
   ConcernSeverity,
-  ConcernStatus
+  ConcernStatus,
+  ProactiveAgendaPayload,
+  AgendaStatus
 } from "./actd";
 
 export interface QdrantEnv {
@@ -20,6 +22,7 @@ export interface QdrantEnv {
 
 const COLLECTION_NAME = "constancy_memories";
 export const CONCERNS_COLLECTION = "constancy_concerns";
+export const AGENDAS_COLLECTION = "constancy_agendas";
 
 async function qdrantFetch(url: string, env: QdrantEnv, options: RequestInit = {}) {
   const headers = {
@@ -1276,6 +1279,286 @@ export async function updateCaseConcerns(
   });
 
   return pointIds.length;
+}
+
+// ==================== Proactive Agenda Operations ====================
+
+async function getAgendaPointById(id: string, env: QdrantEnv) {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${AGENDAS_COLLECTION}/points/${id}`;
+  const res = await qdrantFetch(url, env, { method: "GET" });
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    const errText = await res.text();
+    throw new Error(`Qdrant getAgendaPoint error (${res.status}): ${errText}`);
+  }
+  const data: any = await res.json();
+  return data.result;
+}
+
+export async function ensureAgendasCollection(env: QdrantEnv): Promise<void> {
+  const url = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${AGENDAS_COLLECTION}`;
+  const checkRes = await qdrantFetch(url, env, { method: "GET" });
+  if (!checkRes.ok) {
+    const createRes = await qdrantFetch(url, env, {
+      method: "PUT",
+      body: JSON.stringify({
+        vectors: {
+          size: 4,
+          distance: "Cosine"
+        }
+      })
+    });
+    if (!createRes.ok && createRes.status !== 409) {
+      const errText = await createRes.text();
+      console.warn(`Could not create ${AGENDAS_COLLECTION}: ${errText}`);
+    }
+  }
+}
+
+export async function postAgendaToQdrant(
+  agenda: ProactiveAgendaPayload,
+  env: QdrantEnv
+): Promise<{ agenda_id: string; status: AgendaStatus; is_new: boolean; dedup_action: "created" | "updated" }> {
+  await ensureAgendasCollection(env);
+
+  // If dedup_key is provided, check for existing active agenda
+  if (agenda.dedup_key) {
+    const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${AGENDAS_COLLECTION}/points/scroll`;
+    const checkRes = await qdrantFetch(scrollUrl, env, {
+      method: "POST",
+      body: JSON.stringify({
+        limit: 10,
+        filter: {
+          must: [
+            { key: "user_id", match: { value: agenda.user_id } },
+            { key: "dedup_key", match: { value: agenda.dedup_key } }
+          ]
+        },
+        with_payload: true,
+        with_vector: false
+      })
+    });
+
+    if (checkRes.ok) {
+      const data: any = await checkRes.json();
+      const activePoints = (data.result?.points || []).filter(
+        (p: any) => p.payload?.status !== "done"
+      );
+      if (activePoints.length > 0) {
+        const existingPoint = activePoints[0];
+        const updatePayload: Partial<ProactiveAgendaPayload> = {
+          title: agenda.title,
+          content: agenda.content,
+          urgent: agenda.urgent ?? false,
+          status: "pending", // Reset to pending if it was snoozed
+          schedule_after: agenda.schedule_after,
+          updated_at: agenda.created_at || new Date().toISOString()
+        };
+
+        const updateUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${AGENDAS_COLLECTION}/points/payload?wait=true`;
+        await qdrantFetch(updateUrl, env, {
+          method: "POST",
+          body: JSON.stringify({
+            points: [existingPoint.id],
+            payload: updatePayload
+          })
+        });
+
+        return {
+          agenda_id: String(existingPoint.id),
+          status: "pending",
+          is_new: false,
+          dedup_action: "updated"
+        };
+      }
+    }
+  }
+
+  // Insert new agenda point
+  const upsertUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${AGENDAS_COLLECTION}/points?wait=true`;
+  const insertRes = await qdrantFetch(upsertUrl, env, {
+    method: "PUT",
+    body: JSON.stringify({
+      points: [
+        {
+          id: agenda.id,
+          vector: [0, 0, 0, 0],
+          payload: agenda
+        }
+      ]
+    })
+  });
+
+  if (!insertRes.ok) {
+    const errText = await insertRes.text();
+    throw new Error(`Qdrant postAgenda error (${insertRes.status}): ${errText}`);
+  }
+
+  return {
+    agenda_id: agenda.id,
+    status: agenda.status,
+    is_new: true,
+    dedup_action: "created"
+  };
+}
+
+export async function getPendingAgendasFromQdrant(
+  userId: string,
+  limit: number = 5,
+  env: QdrantEnv
+): Promise<{
+  has_agenda: boolean;
+  total_count: number;
+  agendas: Array<{
+    agenda_id: string;
+    title: string;
+    content: string;
+    urgent: boolean;
+    status: AgendaStatus;
+    schedule_after?: string | null;
+    created_at: string;
+    updated_at: string;
+  }>;
+}> {
+  await ensureAgendasCollection(env);
+
+  const scrollUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${AGENDAS_COLLECTION}/points/scroll`;
+  const res = await qdrantFetch(scrollUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      limit: 100,
+      filter: {
+        must: [
+          { key: "user_id", match: { value: userId } }
+        ]
+      },
+      with_payload: true,
+      with_vector: false
+    })
+  });
+
+  if (!res.ok) {
+    return { has_agenda: false, total_count: 0, agendas: [] };
+  }
+
+  const data: any = await res.json();
+  const allPoints: any[] = data.result?.points || [];
+  const now = Date.now();
+
+  const activePoints = allPoints.filter(pt => {
+    const p = pt.payload as ProactiveAgendaPayload;
+    if (!p || p.status === "done") return false;
+
+    // If schedule_after is specified and in the future, don't surface yet
+    if (p.schedule_after) {
+      const scheduleTime = new Date(p.schedule_after).getTime();
+      if (!isNaN(scheduleTime) && scheduleTime > now) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  // Sort: urgent first, then newest first
+  activePoints.sort((a, b) => {
+    const aUrgent = (a.payload as ProactiveAgendaPayload)?.urgent ? 1 : 0;
+    const bUrgent = (b.payload as ProactiveAgendaPayload)?.urgent ? 1 : 0;
+    if (aUrgent !== bUrgent) return bUrgent - aUrgent;
+
+    const aTime = new Date((a.payload as ProactiveAgendaPayload)?.created_at || 0).getTime();
+    const bTime = new Date((b.payload as ProactiveAgendaPayload)?.created_at || 0).getTime();
+    return bTime - aTime;
+  });
+
+  const selected = activePoints.slice(0, limit);
+  const agendas = selected.map(pt => {
+    const p = pt.payload as ProactiveAgendaPayload;
+    return {
+      agenda_id: String(pt.id),
+      title: p.title,
+      content: p.content,
+      urgent: !!p.urgent,
+      status: p.status,
+      schedule_after: p.schedule_after || null,
+      created_at: p.created_at,
+      updated_at: p.updated_at
+    };
+  });
+
+  return {
+    has_agenda: agendas.length > 0,
+    total_count: agendas.length,
+    agendas
+  };
+}
+
+export async function resolveAgendaInQdrant(
+  userId: string,
+  agendaId: string,
+  status: "done" | "snooze",
+  snoozeUntil: string | undefined,
+  note: string | undefined,
+  env: QdrantEnv
+): Promise<{ agenda_id: string; status: AgendaStatus; updated_at: string; message: string }> {
+  await ensureAgendasCollection(env);
+
+  const cleanId = (agendaId || "").trim();
+  if (!cleanId) throw new Error("Missing agenda_id");
+
+  const point = await getAgendaPointById(cleanId, env);
+  if (!point || !point.payload) {
+    throw new Error(`Agenda with ID '${cleanId}' not found.`);
+  }
+
+  const payload = point.payload as ProactiveAgendaPayload;
+  if (payload.user_id !== userId) {
+    throw new Error(`Unauthorized access to agenda '${cleanId}'.`);
+  }
+
+  const nowIso = new Date().toISOString();
+  const newStatus: AgendaStatus = status === "snooze" ? "snoozed" : "done";
+
+  const updatePayload: Partial<ProactiveAgendaPayload> = {
+    status: newStatus,
+    updated_at: nowIso
+  };
+
+  if (note !== undefined) {
+    updatePayload.resolution_note = note;
+  }
+
+  if (status === "snooze") {
+    if (!snoozeUntil) {
+      throw new Error("snooze_until (ISO 8601 string) is required when status is 'snooze'");
+    }
+    updatePayload.schedule_after = snoozeUntil;
+  }
+
+  const payloadUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/${AGENDAS_COLLECTION}/points/payload?wait=true`;
+  const updateRes = await qdrantFetch(payloadUrl, env, {
+    method: "POST",
+    body: JSON.stringify({
+      points: [cleanId],
+      payload: updatePayload
+    })
+  });
+
+  if (!updateRes.ok) {
+    const errText = await updateRes.text();
+    throw new Error(`Qdrant resolveAgenda error (${updateRes.status}): ${errText}`);
+  }
+
+  const message = newStatus === "done"
+    ? `Agenda '${cleanId}' has been resolved and closed.`
+    : `Agenda '${cleanId}' has been snoozed until ${snoozeUntil}.`;
+
+  return {
+    agenda_id: cleanId,
+    status: newStatus,
+    updated_at: nowIso,
+    message
+  };
 }
 
 
