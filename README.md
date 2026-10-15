@@ -122,6 +122,13 @@ graph TD
     * **🩺 临床处方与世代更迭（医生专用）**：医生完成研判后下达处方，支持维持(`KEEP`)、世代更新(`UPDATE`，旧记忆退休并指向新纪元，新记忆入库并继承谱系)、失效归档(`EXPIRE`)、同构精炼归并(`MERGE`)、留观跟踪(`DEFERRED`)或转送用户会诊(`ESCALATED_TO_USER`)。**严禁日常对话模型调用**。
 22. `inspect_memory(id, max_depth?)`  
     * **【🔬 认知基因透视/因果验血】**：按 ID 精确获取记忆底层元数据（7维时间谱、健康度 V、revisions 与 annotations），双向递归追溯 `predecessor` 前身链与 `superseded_by` 后继链，完整呈现世代全景因果拓扑图。纯只读诊断，零热力学扰动。
+23. `post_proactive_agenda(title, content, urgent?, dedup_key?, schedule_after?)`  
+    * **【📥 全角色通用 - 主动通信待议投递】**：向待议箱提交一条待沟通事项。供外部定时巡检（如 Fastmail 邮件维护）、日常前线会话记录未来待办、或巡诊医生跨会话投递。支持设置紧急程度 (`urgent`)、预约延迟唤醒 (`schedule_after`) 与业务去重键 (`dedup_key`，相同 key 自动合并更新防刷）。详见 [docs/PROACTIVE_AGENDA.md](docs/PROACTIVE_AGENDA.md)。
+24. `check_proactive_agenda(limit?)`  
+    * **【⏰ 客户端定时任务专享 - 普通日常会话请勿随意轮询】**：专供后台每小时定时任务（Scheduled Tasks / Cron）唤醒时轮询待议池。拉取当前有效且待沟通的事项列表（紧急优先）。若 `has_agenda` 为 false，调用方必须保持完全静默直接收工，严禁向用户发送无意义问候。日常闲聊对话中若用户未明确要求查待办切勿调用。
+25. `resolve_proactive_agenda(agenda_id, status, snooze_until?, note?)`  
+    * **【✅ 闭环核销 - 主动通信议题办结/延期】**：核销或更新主动通信议题状态。当当班会话已与用户完成该事项沟通、用户明确表示无需再提时标记为 `'done'`；若用户要求稍后提醒则标记为 `'snooze'` 并指定 `snooze_until`。
+
 ---
 
 ## 🏗️ 飞轮运作流：白天打点，夜间蒸馏，长波自愈
