@@ -3,16 +3,16 @@ main = "src/index.ts"
 compatibility_date = "2024-09-01"
 compatibility_flags = ["nodejs_compat"]
 
+routes = [
+  { pattern = "constancy.bitsquirter.bid", custom_domain = true }
+]
+
 [images]
 binding = "IMAGES"
 
 [vars]
-QDRANT_URL = "https://vec.kufof.uk"
-DOMAIN = "mcp.kufof.uk"
-
-routes = [
-  { pattern = "mcp.kufof.uk", custom_domain = true }
-]
+QDRANT_URL = "https://vec.bitsquirter.bid"
+DOMAIN = "constancy.bitsquirter.bid"
 
 [[kv_namespaces]]
 binding = "CONSTANCY_KV"

@@ -467,9 +467,21 @@ export async function handleToken(request: Request, env: AuthEnv): Promise<Respo
   return new Response(JSON.stringify({ error: "unsupported_grant_type" }), { status: 400 });
 }
 
-// 6. Token Verification Middleware
+// 6. Token Verification & Gateway Propagation Middleware
 export async function authenticateRequest(request: Request, env: AuthEnv): Promise<string | null> {
-  // Fail-closed: missing security configuration denies all access
+  const clientIp = request.headers.get("cf-connecting-ip") || "";
+  const GATEWAY_IP = "104.152.208.44";
+
+  // Priority 1: Direct Internal Gateway Traffic (Physical Isolation + sub_id Propagation)
+  if (clientIp === GATEWAY_IP) {
+    const subHeader = request.headers.get("x-consumer-sub");
+    if (subHeader && subHeader.trim()) {
+      return subHeader.trim();
+    }
+  }
+
+  // Priority 2: Standard Bearer Token Verification
+  // Fail-closed: missing security configuration denies legacy access
   if (!env.JWT_SECRET || !env.ALLOWED_EMAILS) {
     return null;
   }
@@ -491,7 +503,8 @@ export async function authenticateRequest(request: Request, env: AuthEnv): Promi
 
   // Real-time Whitelist Enforcement on EVERY request (Fail-closed)
   const whitelist = env.ALLOWED_EMAILS.split(",").map(e => e.trim().toLowerCase()).filter(Boolean);
-  if (!whitelist.includes((payload.sub as string).toLowerCase().trim())) {
+  const subStr = (payload.sub as string).toLowerCase().trim();
+  if (!whitelist.includes(subStr)) {
     return null;
   }
 
