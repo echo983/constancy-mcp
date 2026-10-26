@@ -150,6 +150,11 @@ graph LR
 * **统一对外入口**：`https://mcp.bitsquirter.bid/mcp`（由 MCPHub 集中提供 Google 账号鉴权与额度门禁）；
 * **物理网络阻断**：本 Worker 部署于 `constancy.bitsquirter.bid`，仅放行网关宿主机 IP（`104.152.208.44`）的直接流量，拒绝外部直接探测（403）；
 * **多租户数据隔离**：全链路采用 Google 官方数字身份 `sub_id`（通过网关头 `X-Consumer-Sub` 透传）作为 Qdrant Payload 的唯一 `user_id` 过滤主键，实现各租户之间物理/逻辑级绝对隔离。
+* **分级用量与周配额校验 (v1.12.0)**：
+  - **内部管理员白名单**：主账号通过 Google `sub_id` 直通，全免配额校验；
+  - **普通注册用户**：默认分配免费额度 **100 次/周**，每周一 00:00 (UTC) 自动重置刷新（Zero-Cron 零定时任务按需自愈）；
+  - **元数据与指引豁免**：`constancy-get_agent_init_info` 设为免费工具，会话开启与人设加载不扣减周调用额度；
+  - **实时用量可见**：支持访问 `https://mcp.bitsquirter.bid/api/quota` 随时查询当前周剩余额度与重置周期。
 
 ---
 
@@ -162,6 +167,7 @@ graph LR
 - [x] OAuth 2.1 RFC 8414 + 1 年免密动态注册 (Claude Custom Connectors 支持)
 - [x] 统一接入企业级 MCPHub 聚合网关 (`https://mcp.bitsquirter.bid/mcp`)
 - [x] 物理网络阻断与 Google `sub_id` 多租户强隔离架构 (零公网暴露)
+- [x] 用户权限分级、周额度校验与大模型亲和拦截网关
 - [ ] 官方 TypeScript / Python 本地 MCP Server 实现
 - [ ] Claude Desktop / Cursor / Antigravity 一键安装配置指南
 - [ ] 自动化每日日记提取与实体清单蒸馏 Prompt 模版

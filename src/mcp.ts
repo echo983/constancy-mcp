@@ -220,7 +220,7 @@ export interface McpEnv extends VoyageEnv, QdrantEnv {
   IMAGES?: any;
 }
 
-export const CONSTANCY_VERSION = "1.10.0";
+export const CONSTANCY_VERSION = "1.12.0";
 
 export function generateAgentInitInfo(
   role: string = "chat",
