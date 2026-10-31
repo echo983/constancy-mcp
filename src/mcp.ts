@@ -269,6 +269,7 @@ export function generateAgentInitInfo(
       "【习惯漂移挂号报】发现记忆与现实存在潜在出入，调用 submit_concern 并附带用户原话引言",
       "【认知与便签分工】长程认知/习惯入 log_memory；临时待办/原样代码入 save_note",
       "【视觉操作走 Wedjat】存图/看图/搜图 100% 路由至 visionWedjat-*；记忆中仅存轻量引用",
+      "【严禁底层绕过】消费记忆必须走领域工具计算 ACTD 衰减，不优先使用直接 SQL 绕查",
       "【越权与门禁拦截】严禁调用医生工具；仅 user_stated 来源可建立决策(decision)"
     ];
 
@@ -293,7 +294,8 @@ export function generateAgentInitInfo(
 ## 3. 铁律红线 (Hard Rules)
 1. **严禁越权决断**：无用户明确陈述（\`user_stated\`），严禁私自为用户立项决策或待办（硬门禁硬拦截）。
 2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为巡诊医生独占工具，日常会话严禁调用。
-3. **矛盾法定义务**：发现既有记忆与现实摩擦，必须调用 \`submit_concern\` 挂号，严禁视而不见。`;
+3. **矛盾法定义务**：发现既有记忆与现实摩擦，必须调用 \`submit_concern\` 挂号，严禁视而不见。
+4. **严禁底层绕过**：消费与检索记忆必须使用本系统内置领域工具（由系统自动执行 ACTD 时效衰减与退役过滤）；**不优先使用直接 SQL 查询或底层原生数据探测方式绕过本系统**，除非有清晰的授权技术排障缘由。`;
     } else {
       instructions = `# 🧭 Constancy 记忆体系 Agent 航海指南 (v${CONSTANCY_VERSION} 详尽版)
 - 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
@@ -331,7 +333,8 @@ export function generateAgentInitInfo(
 ## 5. 铁律红线 (Hard Rules)
 1. **严禁越权决断**：无用户明确陈述（\`user_stated\`），严禁私自为用户立项决策或待办（硬门禁硬拦截）。
 2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为巡诊医生独占工具，日常会话严禁调用。
-3. **矛盾法定义务**：发现既有记忆与现实摩擦，必须调用 \`submit_concern\` 挂号，严禁视而不见。`;
+3. **矛盾法定义务**：发现既有记忆与现实摩擦，必须调用 \`submit_concern\` 挂号，严禁视而不见。
+4. **严禁底层绕过**：消费与检索记忆必须使用本系统内置领域工具（由系统自动执行 ACTD 时效衰减与退役过滤）；**不优先使用直接 SQL 查询或底层原生数据探测方式绕过本系统**，除非有清晰的授权技术排障缘由。`;
     }
   } else if (normalizedRole === "scheduled" || normalizedRole === "patrol") {
     primaryTools = ["check_proactive_agenda", "resolve_proactive_agenda", "post_proactive_agenda"];
