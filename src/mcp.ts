@@ -220,7 +220,7 @@ export interface McpEnv extends VoyageEnv, QdrantEnv {
   IMAGES?: any;
 }
 
-export const CONSTANCY_VERSION = "1.12.0";
+export const CONSTANCY_VERSION = "1.13.0";
 
 export function generateAgentInitInfo(
   role: string = "chat",
@@ -260,9 +260,6 @@ export function generateAgentInitInfo(
       "list_notes",
       "get_note",
       "update_note",
-      "fetch_image_vision",
-      "request_image_upload",
-      "commit_image_record",
       "post_proactive_agenda",
       "resolve_proactive_agenda"
     ];
@@ -271,7 +268,7 @@ export function generateAgentInitInfo(
       "【确凿事实当面改】用户亲口陈述事实变动，当场调用 update_memory 完成原子换代，零推诿等待",
       "【隐性存疑挂号报】发现记忆与现实存在潜在出入或漂移，调用 submit_concern（带用户原话引言）",
       "【硬门禁拦截】仅 user_stated 来源可建立决策(decision)与待办(todo)，严禁越权替用户立项",
-      "【存疑横幅留余地】检索结果带有【⚠️ 事实存疑待核】前缀时，向用户回复需自然留有余地",
+      "【视觉感知全权交由 Wedjat】所有看图、存图、搜图、微切片与重构 100% 路由至 visionWedjat-* 模块；Constancy 记忆仅引用 [Wedjat: scene_id]",
       "【主动通信分工】check_proactive_agenda 专供后台定时任务轮询，日常会话若用户未明确指示查待办切勿调用；需稍后跟进事项调用 post_proactive_agenda，聊完调用 resolve_proactive_agenda 结案"
     ];
 
@@ -280,16 +277,16 @@ export function generateAgentInitInfo(
 - 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
 
 ## 1. 你的角色定位 (Persona)
-你是用户的日常对话伙伴与记忆管家。你的职责是：**检索当下有效真理、确凿事实当面换代、异常矛盾法定义务上报**。
+你是用户的日常对话伙伴与思维外脑。你的职责是：**检索当下有效真理、确凿事实当面换代、异常矛盾法定义务上报**。
 
 ## 2. 核心行为决策树 (Decision Flow)
-- 🔍 **【查】找历史认知/便签/照片** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`；查视觉细节用 \`fetch_image_vision\`。
+- 🔍 **【查】找历史认知/便签** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`。
   - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表该记忆已被提出存疑，回复时请自然留有余地或向用户确认。*
 - ⚡ **【改】用户当面明确更正事实** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
 - 📋 **【疑】隐性矛盾/习惯漂移/存疑出入** ➡️ **调用 \`submit_concern\` 挂号上报**（必须包含用户原话引言作为 evidence，禁止主观脑补删改）。
 - ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
 - 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
-- 🖼️ **【图】上传新照片到图库** ➡️ \`request_image_upload\` 获取直传 URL，经沙箱/本地 curl 上传成功后调用 \`commit_image_record\` 闭环入库。
+- 👁️ **【图】视觉与图像绝对分工** ➡️ **所有生活照片、视觉素材上传、空间搜图、真实验证微切片与2K重构，100% 路由至 \`visionWedjat-*\` 模块！** Constancy 专职长程认知与时间动力学，不再直接存储图片；若某条记忆关联视觉画面，仅需在正文中轻量标注 \`[Wedjat: scene_xxxx]\` 即可。
 - 💬 **【议】主动待办中枢** ➡️ 需要稍后向用户主动沟通的事项调用 \`post_proactive_agenda\`；定时任务每小时调用 \`check_proactive_agenda\` 轮询；聊完调用 \`resolve_proactive_agenda\` 结案。
 
 ## 3. 铁律红线 (Hard Rules)
@@ -302,16 +299,16 @@ export function generateAgentInitInfo(
 - 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
 
 ## 1. 你的角色与心智 (Persona)
-你是用户的日常对话伙伴与记忆管家。你的职责是：**业务消费当下真理、确凿事实当面换代、异常矛盾法定义务上报**。
+你是用户的日常对话伙伴与思维外脑。你的职责是：**业务消费当下真理、确凿事实当面换代、异常矛盾法定义务上报**。
 
 ## 2. 核心行为决策树 (Decision Flow)
-- 🔍 **【查】找历史认知/便签/照片** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`；查视觉细节用 \`fetch_image_vision\`。
+- 🔍 **【查】找历史认知/便签** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`。
   - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表该记忆已被挂上存疑注记，回复时请自然留有余地或适度向用户求证。*
 - ⚡ **【改】用户当面明确更正事实** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
 - 📋 **【疑】隐性矛盾/习惯漂移/存疑出入** ➡️ **调用 \`submit_concern\` 挂号上报**（必须包含用户原话引言作为 evidence，禁止主观脑补删改）。
 - ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
 - 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
-- 🖼️ **【图】上传新照片到图库** ➡️ \`request_image_upload\` 获取直传 URL，经沙箱/本地 curl 上传成功后调用 \`commit_image_record\` 闭环入库。
+- 👁️ **【图】视觉与图像绝对分工** ➡️ **所有生活照片、视觉素材上传、空间搜图、真实验证微切片与2K重构，100% 路由至 \`visionWedjat-*\` 模块！** Constancy 专职长程认知与时间动力学，不再直接存储图片；若某条记忆关联视觉画面，仅需在正文中轻量标注 \`[Wedjat: scene_xxxx]\` 即可。
 - 💬 **【议】主动待办中枢** ➡️ 需要稍后向用户主动沟通的事项调用 \`post_proactive_agenda\`；定时任务每小时调用 \`check_proactive_agenda\` 轮询；聊完调用 \`resolve_proactive_agenda\` 结案。
 
 ## 3. 确凿换代 vs. 存疑上报判定准则 (Case Studies)
@@ -529,7 +526,7 @@ export const MCP_TOOLS = [
   },
   {
     name: "search_memory",
-    description: "按语义意图或时空结构化条件跨模态检索历史记忆、便签与视觉图片。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持多模态语义检索，或纯按时间范围 (date_from / date_to) 与 GPS 地理坐标/半径 (near，支持排除特定范围如'出门在外') 进行结构化过滤。每张图片均提供 variants 多分辨率变体（ai1024 适于密集文本/细微细节、ai768 适于通用场景分析推荐、ai512 极速轻量低 Token、public 用于用户查看）以及沙箱 curl 命令，供大模型根据实际分析需求自主选用。系统已内置视觉资产与关联便签动态去重，避免重复占用结果位。若某条记忆存在存疑或矛盾注记，返回正文头部会自动前置【⚠️ 事实存疑待核】警示横幅与注记摘要（原始正文保存在 original_content），提示模型在回复时留有余地。",
+    description: "按语义意图或时空结构化条件检索历史认知记忆与案头便签。系统会自动代入 ACTD 动力学连续懒衰减，并计算时效健康度 V。支持纯文本意图搜索，或纯按时间范围 (date_from / date_to) 与 GPS 地理坐标/半径 (near，支持排除特定范围如'出门在外') 进行结构化过滤。若某条记忆存在存疑或矛盾注记，返回正文头部会自动前置【⚠️ 事实存疑待核】警示横幅与注记摘要（原始正文保存在 original_content），提示模型在回复时留有余地。注意：如需按语义搜索生活照片或视觉图库场景，请直接使用 visionWedjat-search_visual_scenes。",
     inputSchema: {
       type: "object",
       properties: {
@@ -552,7 +549,7 @@ export const MCP_TOOLS = [
             latitude: { type: "number", description: "中心纬度 (例如 37.7605)" },
             longitude: { type: "number", description: "中心经度 (例如 -3.7955)" },
             radius_meters: { type: "number", description: "搜索半径（米），默认 1000 米" },
-            exclude: { type: "boolean", description: "是否反向排除该区域（设为 true 表示检索远离该位置的照片/便签，如'出门在外'检索），默认 false" }
+            exclude: { type: "boolean", description: "是否反向排除该区域（设为 true 表示检索远离该位置的便签/记忆，如'出门在外'检索），默认 false" }
           },
           required: ["latitude", "longitude"]
         },
@@ -562,7 +559,7 @@ export const MCP_TOOLS = [
         },
         type: {
           type: "string",
-          description: "限定类型过滤 (可选。'all'=全景聚合检索; 'image'=专搜视觉图片; 'note'=便签; 'insight'/'decision'/'event'/'memo'=认知碎片)"
+          description: "限定类型过滤 (可选。'all'=全景聚合检索; 'note'=便签; 'insight'/'decision'/'event'/'memo'=认知碎片)"
         },
         entity: {
           type: "string",
@@ -575,18 +572,6 @@ export const MCP_TOOLS = [
         include_retired: {
           type: "boolean",
           description: "是否包含已主动废弃/归档的记忆。默认 false (物理屏蔽，彻底避免幽灵干扰)"
-        },
-        include_images: {
-          type: "boolean",
-          description: "是否同时检索并召回匹配的视觉图片，默认 true。当为 true 时，若图库中有语义相近的照片，会直接附带 CDN 访问 URL 与沙箱下载命令。"
-        },
-        image_url: {
-          type: "string",
-          description: "多模态检索：提供图片的公开或签名 URL，与 query 联合进行跨模态语义检索 (可选)"
-        },
-        image_base64: {
-          type: "string",
-          description: "多模态检索：提供图片的 Base64 编码数据 (支持 PNG/JPEG/WEBP/GIF，可选)"
         },
         pending_confirmation_only: {
           type: "boolean",
@@ -835,30 +820,7 @@ export const MCP_TOOLS = [
       properties: {
         id: {
           type: "string",
-          description: "便签 ID (Note UUID) 或 Cloudflare 图片 ID (image_id)"
-        }
-      },
-      required: ["id"]
-    }
-  },
-  {
-    name: "fetch_image_vision",
-    description: "【视觉直读】将图库中的指定图片以图像形式直接载入模型视觉通道，无需沙箱下载。当需要亲眼核对画面细节（辨认招牌小字、核实物体位置、比对与文字描述是否一致、回答'图里到底有没有某物'）时调用。若仅需向用户展示图片或提供下载链接，请改用 get_blob_url；若需批量处理、裁剪或本地 OCR，请走沙箱 curl 路径。每次仅能载入一张图，请按需选择分辨率变体以控制 Token 开销：ai512 极省（约200-350 tokens，用于粗粒度识别）、ai768 推荐默认（约500-800 tokens，通用场景理解）、ai1024 高精（约1100-1600 tokens，仅用于密集文本/复杂图表）。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        id: {
-          type: "string",
-          description: "Cloudflare 图片 ID (image_id)、图库点 UUID，或与图片关联的 Note 便签 UUID（多态解析）。必填。"
-        },
-        variant: {
-          type: "string",
-          enum: ["ai512", "ai768", "ai1024"],
-          description: "分辨率变体，默认 ai768。注意严禁开放 public 原图变体，避免数百万像素灌爆上下文。"
-        },
-        include_metadata: {
-          type: "boolean",
-          description: "是否在图像块之前附带一小段简短文本块（说明该图标题、拍摄时间、GPS坐标）。默认 true。"
+          description: "便签 ID (Note UUID)"
         }
       },
       required: ["id"]
@@ -892,70 +854,6 @@ export const MCP_TOOLS = [
           description: "可选。人基常度 C_H (定义: C_H = log₁₀(半衰期/1ms))，默认 8.8 (约1~2周)。"
         }
       }
-    }
-  },
-  {
-    name: "request_image_upload",
-    description: "【申请 Cloudflare Images 直传凭据】照片与视觉素材上传流水线第 1 步。当用户要求上传/保存照片或视觉素材到图库/外脑时调用。预分配 Cloudflare Images 存储 ID 并生成 5 分钟有效的一次性直传 URL。用于 Claude 或客户端在本地沙箱中直接通过 curl 将图片二进制直传至 Cloudflare Images 永久图库（零 Token 上下文传输，自动开启签名防泄漏）。上传成功后，由大模型观察画面细节并提取 EXIF/GPS，调用 commit_image_record 完成闭环入库与便签绑定。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        filename: {
-          type: "string",
-          description: "可选。原始图片文件名 (例如 'datacenter_rack.jpg' 或 'flowchart.png')"
-        }
-      }
-    }
-  },
-  {
-    name: "commit_image_record",
-    description: "【视觉资产入库确认】照片与视觉素材上传流水线第 2 步（闭环确认）。图片直传 Cloudflare Images 成功后调用：将图片正式录入 Qdrant 视觉图库（images 集合）并同步在 Constancy 便签库创建关联便签。由 Claude 发挥原生视觉大模型能力生成深度中文描述、识别画面主体细节与文字，并提取传入 EXIF 拍摄时间 (captured_at) 与 GPS 坐标 (latitude/longitude)，以支持后续按时间与地理位置的结构化范围检索。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        image_id: {
-          type: "string",
-          description: "Cloudflare Images 分配的图片 ID (必填)"
-        },
-        description: {
-          type: "string",
-          description: "Claude 对图片的深度视觉描述，包括核心主体、关键细节、招牌/标签文字、环境场景等 (必填)"
-        },
-        title: {
-          type: "string",
-          description: "可选。图片简短标题 (例如 '核心交换机跳线分布图' / '徐家汇商圈夜景')"
-        },
-        filename: {
-          type: "string",
-          description: "可选。原始文件名"
-        },
-        tags: {
-          type: "array",
-          items: { type: "string" },
-          description: "可选。分类标签列表 (例如 ['hardware', 'network', 'cisco'])"
-        },
-        latitude: {
-          type: "number",
-          description: "可选。拍摄地点纬度 (例如 31.2304)"
-        },
-        longitude: {
-          type: "number",
-          description: "可选。拍摄地点经度 (例如 121.4737)"
-        },
-        exif: {
-          type: "object",
-          description: "可选。相机与拍摄参数元数据 (例如 { device, dateTime, lens, iso, aperture })"
-        },
-        captured_at: {
-          type: "string",
-          description: "可选。拍摄时间 ISO 8601 或 YYYY:MM:DD HH:MM:SS 格式，如未传将尝试从 exif.dateTime 读取，标准化为 UTC ISO 8601 存入"
-        },
-        create_note: {
-          type: "boolean",
-          description: "可选。若图库中该图片尚未创建关联便签，是否在 Constancy 便签库创建关联 Note 便签（默认 true）。注意：若关联便签已存在，系统将无条件强制同步更新该便签并记录 revisions 审计链，不受此参数限制。"
-        }
-      },
-      required: ["image_id", "description"]
     }
   },
   {
@@ -1254,8 +1152,6 @@ export async function executeToolCall(
   // 2. Tool: search_memory
   if (name === "search_memory") {
     const query = (args.query || "").trim();
-    const imageUrl = (args.image_url || "").trim() || undefined;
-    const imageBase64 = (args.image_base64 || "").trim() || undefined;
     const dateFrom = parseDateFilter(args.date_from, false);
     const dateTo = parseDateFilter(args.date_to, true);
     const near = parseNearFilter(args.near);
@@ -1265,22 +1161,16 @@ export async function executeToolCall(
     const pendingConfirmationOnly = Boolean(args.pending_confirmation_only);
     const hasStructuredFilter = Boolean(dateFrom || dateTo || near || (typeFilter && typeFilter !== "all") || entity || pendingConfirmationOnly);
 
-    if (!query && !imageUrl && !imageBase64 && !hasStructuredFilter) {
-      throw new Error("Missing query, image input, or structured filter (date_from, date_to, near, entity, pending_confirmation_only)");
+    if (!query && !hasStructuredFilter) {
+      throw new Error("Missing query or structured filter (date_from, date_to, near, entity, pending_confirmation_only)");
     }
 
     const limit = Math.min(Math.max(parseInt(args.limit) || 5, 1), 20);
     const minValidity = pendingConfirmationOnly ? 0.0 : (typeof args.min_validity === "number" ? Math.max(0, Math.min(1, args.min_validity)) : 0.2);
     const includeRetired = Boolean(args.include_retired);
-    const isImageOnly = typeFilter === "image";
-    const includeImages = !pendingConfirmationOnly && args.include_images !== false && (typeFilter === "" || typeFilter === "all" || typeFilter === "image");
 
-    const queryInput = (imageUrl || imageBase64)
-      ? { text: query, imageUrl, imageBase64 }
-      : query;
-
-    const queryVector = (query || imageUrl || imageBase64)
-      ? await getEmbedding(queryInput, env, "query")
+    const queryVector = query
+      ? await getEmbedding(query, env, "query")
       : null;
 
     const structuredFilter: StructuredSearchFilter = {
@@ -1292,18 +1182,7 @@ export async function executeToolCall(
       pending_confirmation_only: pendingConfirmationOnly || undefined
     };
 
-    const searchMemoriesPromise = isImageOnly
-      ? searchMemoryPoints(queryVector, userId, Math.min(limit, 8), env, { ...structuredFilter, type: "note" })
-      : searchMemoryPoints(queryVector, userId, limit * 3, env, structuredFilter);
-
-    const searchImagesPromise = includeImages
-      ? searchImagePoints(queryVector, userId, Math.min(limit, 8), env, structuredFilter)
-      : Promise.resolve([]);
-
-    const [candidates, imageCandidates] = await Promise.all([
-      searchMemoriesPromise,
-      searchImagesPromise
-    ]);
+    const candidates = await searchMemoryPoints(queryVector, userId, limit * 3, env, structuredFilter);
 
     const evaluatedList: EvaluatedMemory[] = [];
 
@@ -1435,131 +1314,20 @@ export async function executeToolCall(
       }
     }
 
-    // If queryVector is null (pure structured query), sort images by captured_at descending
-    if (!queryVector) {
-      imageCandidates.sort((a: any, b: any) => {
-        const tA = new Date(a.payload?.captured_at || a.payload?.created_at || 0).getTime();
-        const tB = new Date(b.payload?.captured_at || b.payload?.created_at || 0).getTime();
-        return tB - tA;
-      });
-    }
-
-    // Dual-channel visual asset recall: if notes with associated images were retrieved, pull their image points into imageCandidates
-    const existingCandidateImgIds = new Set((imageCandidates || []).map((c: any) => c.payload?.image_id || c.id));
-    for (const item of candidates) {
-      const p = item.payload;
-      if (!p) continue;
-      const assocImgId = p.image_id || extractAssociatedImageId(p);
-      if (assocImgId && !existingCandidateImgIds.has(assocImgId)) {
-        existingCandidateImgIds.add(assocImgId);
-        const linkedImgPoints = await findImagePointsByImageId(assocImgId, userId, env);
-        if (linkedImgPoints.length > 0) {
-          imageCandidates.push({
-            id: linkedImgPoints[0].id,
-            payload: linkedImgPoints[0].payload,
-            score: Number((item.score || 0).toFixed(4))
-          });
-        }
-      }
-    }
-
-    // Format visual image results with ready-to-use signed CDN URLs and curl commands
-    // 🌟 FIX-3 (方案 B): 实时联查关联便签，以主库 (constancy_memories) 活跃便签的描述与治理注记为唯一权威
-    const imageResultsRaw = await Promise.all((imageCandidates || []).map(async item => {
-      const p = item.payload || {};
-      const imgId = p.image_id || item.id;
-      const variants = await getSignedImageVariants(imgId, env, 7200);
-
-      const linkedNote = await findNoteByImageId(imgId, userId, env);
-      const noteP = linkedNote?.payload;
-
-      // Authoritative description: prefer active note content (strip trailing CF image ID tag)
-      let displayDescription = p.description || "";
-      if (noteP?.content) {
-        displayDescription = noteP.content.replace(/\n*\[(?:Cloudflare Images ID|图片 ID):\s*[a-zA-Z0-9_-]+\]/gi, "").trim();
-      }
-
-      const annotations = noteP?.annotations && noteP.annotations.length > 0 ? noteP.annotations : undefined;
-      const isRetired = Boolean(noteP?.retired || p.retired);
-      const statusBadge = isRetired ? "⚪ 废弃归档" : (noteP?.annotations?.length ? "🟡 存疑更正" : "🟢 确信有效");
-
-      return {
-        image_id: imgId,
-        title: noteP?.title || p.title || p.filename || "视觉图像资产",
-        filename: p.filename || "image.jpg",
-        description: displayDescription,
-        score: Number((item.score || 0).toFixed(4)),
-        tags: noteP?.tags || p.tags || [],
-        exif: p.exif || undefined,
-        location: p.location || noteP?.location || undefined,
-        captured_at: p.captured_at || noteP?.captured_at || p.created_at || undefined,
-        created_at: p.created_at,
-        expires_in: 7200,
-        url: variants.public,
-        variants,
-        variant_guide: AI_VISION_VARIANT_GUIDE,
-        curl_command: `curl -s -o "${p.filename || 'downloaded_image.jpg'}" "${variants.public}"`,
-        note_id: linkedNote?.id || undefined,
-        annotations,
-        has_annotations: Boolean(annotations && annotations.length > 0),
-        status_badge: statusBadge,
-        predecessor: noteP?.predecessor || undefined,
-        superseded_by: noteP?.superseded_by || undefined,
-        revisions_count: Array.isArray(noteP?.revisions) ? noteP.revisions.length : 0,
-        retired: isRetired ? true : undefined
-      };
-    }));
-
-    // Deduplicate imageResults by image_id (keep highest score) and filter retired if not requested
-    const seenImgIds = new Set<string>();
-    const imageResults: typeof imageResultsRaw = [];
-    for (const img of imageResultsRaw) {
-      if (img.image_id) {
-        if (seenImgIds.has(img.image_id)) continue;
-        seenImgIds.add(img.image_id);
-      }
-      if (img.retired && !includeRetired) continue;
-      imageResults.push(img);
-    }
-
-    // Deduplicate: If an image note's associated visual image is already presented in imageResults,
-    // filter out the duplicate text note so it doesn't waste a memory result slot or clutter LLM context.
-    const returnedImageIds = new Set<string>();
-    for (const img of imageResults) {
-      if (img.image_id) returnedImageIds.add(img.image_id);
-    }
-
-    const deduplicatedMemories = evaluatedList.filter(item => {
-      const assocImgId = item.image_id || extractAssociatedImageId(item);
-      if (assocImgId && returnedImageIds.has(assocImgId)) {
-        return false;
-      }
-      return true;
-    });
-
     // Sort memories: by composite_score descending, tie-break by timestamp descending
-    deduplicatedMemories.sort((a, b) => {
+    evaluatedList.sort((a, b) => {
       const diff = (b.composite_score || 0) - (a.composite_score || 0);
       if (Math.abs(diff) > 0.001) return diff;
       return new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime();
     });
-    const memoryResults = deduplicatedMemories.slice(0, limit);
+    const memoryResults = evaluatedList.slice(0, limit);
 
-    const totalFound = (isImageOnly ? 0 : memoryResults.length) + imageResults.length;
-    const returnObj: any = {
+    return {
       query: query || undefined,
       filter: hasStructuredFilter ? structuredFilter : undefined,
-      found_count: totalFound
+      found_count: memoryResults.length,
+      memories: memoryResults
     };
-
-    if (!isImageOnly) {
-      returnObj.memories = memoryResults;
-    }
-    if (imageResults.length > 0 || isImageOnly) {
-      returnObj.images = imageResults;
-    }
-
-    return returnObj;
   }
 
   // 3. Tool: get_daily_timeline
@@ -2559,325 +2327,41 @@ export async function executeToolCall(
     const targetId = (args.id || "").trim();
     if (!targetId) throw new Error("Missing id");
 
-    // 1. Try finding in constancy_memories first
     const point = await getPointById(targetId, env);
-    if (point && point.payload && point.payload.user_id === userId) {
-      const p = point.payload;
-
-      // Branch 1A: Note has native base64 binary attachment
-      if (p.base64) {
-        const exp = Math.floor(nowMs / 1000) + 300; // 5 minutes validity
-        const sig = await generateBlobSig("GET", targetId, userId, exp, env.JWT_SECRET);
-        const domain = env.DOMAIN || "mcp.kufof.uk";
-        const downloadUrl = `https://${domain}/blob/${targetId}?exp=${exp}&sig=${sig}`;
-
-        let sha256 = p.sha256;
-        if (!sha256 && p.base64) {
-          sha256 = await computeBase64Sha256(p.base64);
-          setPointPayload(targetId, { sha256 }, env).catch(() => {});
-        }
-
-        const exactBytes = atob(p.base64).length;
-
-        return {
-          success: true,
-          id: targetId,
-          type: "note_attachment",
-          title: p.title || undefined,
-          download_url: downloadUrl,
-          mime_type: p.mime_type || "application/octet-stream",
-          sha256: sha256 || undefined,
-          size_bytes: exactBytes,
-          expires_at: new Date(exp * 1000).toISOString(),
-          curl_command: `curl -s -o attachment "${downloadUrl}"`
-        };
-      }
-
-      // Branch 1B: Note references Cloudflare Images
-      const cfMatch = p.content?.match(/\[Cloudflare Images ID:\s*([a-zA-Z0-9_-]+)\]/);
-      const linkedImageId = cfMatch ? cfMatch[1] : (p as any).image_id;
-      if (linkedImageId) {
-        const variants = await getSignedImageVariants(linkedImageId, env, 7200);
-        return {
-          success: true,
-          id: targetId,
-          image_id: linkedImageId,
-          type: "cloudflare_image",
-          title: p.title || "视觉图像资产",
-          download_url: variants.public,
-          variants,
-          variant_guide: AI_VISION_VARIANT_GUIDE,
-          mime_type: p.mime_type || "image/jpeg",
-          expires_at: new Date(Date.now() + 7200 * 1000).toISOString(),
-          curl_command: `curl -s -o "${linkedImageId}.jpg" "${variants.public}"`
-        };
-      }
+    if (!point || !point.payload || point.payload.user_id !== userId) {
+      throw new Error(`Note '${targetId}' not found or unauthorized.`);
     }
 
-    // 2. Try finding in Qdrant images collection (by point UUID or Cloudflare image_id)
-    const imgPoint = await getImagePoint(targetId, userId, env);
-    if (imgPoint && imgPoint.payload) {
-      const p = imgPoint.payload;
-      const imgId = p.image_id || imgPoint.id;
-      const variants = await getSignedImageVariants(imgId, env, 7200);
-      return {
-        success: true,
-        id: targetId,
-        image_id: imgId,
-        type: "cloudflare_image",
-        title: p.title || p.filename || "视觉图像资产",
-        description: p.description || undefined,
-        download_url: variants.public,
-        variants,
-        variant_guide: AI_VISION_VARIANT_GUIDE,
-        mime_type: "image/jpeg",
-        exif: p.exif || undefined,
-        location: p.location || undefined,
-        expires_at: new Date(Date.now() + 7200 * 1000).toISOString(),
-        curl_command: `curl -s -o "${p.filename || imgId + '.jpg'}" "${variants.public}"`
-      };
+    const p = point.payload;
+    if (!p.base64) {
+      throw new Error(`Note '${targetId}' has no binary payload attachment.`);
     }
 
-    if (point) {
-      throw new Error(`Note '${targetId}' has no binary payload or image attachment.`);
+    const exp = Math.floor(nowMs / 1000) + 300; // 5 minutes validity
+    const sig = await generateBlobSig("GET", targetId, userId, exp, env.JWT_SECRET);
+    const domain = env.DOMAIN || "constancy.bitsquirter.bid";
+    const downloadUrl = `https://${domain}/blob/${targetId}?exp=${exp}&sig=${sig}`;
+
+    let sha256 = p.sha256;
+    if (!sha256 && p.base64) {
+      sha256 = await computeBase64Sha256(p.base64);
+      setPointPayload(targetId, { sha256 }, env).catch(() => {});
     }
 
-    throw new Error(`Resource '${targetId}' not found or unauthorized.`);
-  }
+    const exactBytes = atob(p.base64).length;
 
-  // 11.1 Tool: fetch_image_vision
-  if (name === "fetch_image_vision") {
-    const rawId = (args.id || "").trim();
-    if (!rawId) throw new Error("Missing required parameter: id");
-
-    // Guardrail: Whitelist regex validation for id format
-    if (!/^[a-zA-Z0-9_-]{4,128}$/.test(rawId)) {
-      throw new Error(`Invalid id format: '${rawId}'. Expected valid UUID or image identifier.`);
-    }
-
-    const variant = (args.variant || "ai768").trim();
-    if (!["ai512", "ai768", "ai1024"].includes(variant)) {
-      throw new Error(`Invalid variant: '${variant}'. Only 'ai512', 'ai768', and 'ai1024' are permitted to protect context window.`);
-    }
-    const includeMetadata = args.include_metadata !== false;
-
-    let targetImageId: string | null = null;
-    let title: string = "视觉图像资产";
-    let takenAt: string | undefined = undefined;
-    let locationStr: string | undefined = undefined;
-    let nativeBase64: string | null = null;
-    let nativeMimeType: string = "image/jpeg";
-    let isNoteWithoutImage = false;
-
-    // 1. Try finding in constancy_memories (Note UUID or memory point)
-    const isUuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(rawId);
-    const point = isUuid ? await getPointById(rawId, env) : null;
-    if (point && point.payload && point.payload.user_id === userId) {
-      const p = point.payload;
-      if (p.title) title = p.title;
-      if (p.captured_at || p.created_at || p.timestamp) {
-        takenAt = p.captured_at || p.created_at || p.timestamp;
-      }
-      const loc = p.location as any;
-      if (loc) {
-        const lat = loc.lat ?? loc.latitude;
-        const lon = loc.lon ?? loc.longitude;
-        if (typeof lat === "number" && typeof lon === "number") {
-          locationStr = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
-        }
-      }
-
-      // Check if note contains native base64 image
-      if (p.base64) {
-        const declaredMime = (p.mime_type || "").toLowerCase().trim();
-        if (declaredMime.startsWith("image/")) {
-          nativeBase64 = p.base64;
-          nativeMimeType = declaredMime.split(";")[0].trim();
-        }
-      }
-
-      if (!nativeBase64) {
-        const cfImageId = extractAssociatedImageId(p);
-        if (cfImageId) {
-          targetImageId = cfImageId;
-        } else {
-          isNoteWithoutImage = true;
-        }
-      }
-    }
-
-    if (isNoteWithoutImage && !targetImageId && !nativeBase64) {
-      throw new Error(`Note '${rawId}' has no image attachment or associated Cloudflare Image ID.`);
-    }
-
-    // 2. Check images collection (by UUID or image_id or targetImageId)
-    const lookupId = targetImageId || rawId;
-    if (!nativeBase64) {
-      const imgPoint = await getImagePoint(lookupId, userId, env);
-      if (imgPoint && imgPoint.payload) {
-        const p = imgPoint.payload;
-        targetImageId = p.image_id || imgPoint.id;
-        if (p.title || p.filename) {
-          title = p.title || p.filename;
-        }
-        if (p.captured_at || p.taken_at || p.created_at) {
-          takenAt = p.captured_at || p.taken_at || p.created_at;
-        }
-        const loc = p.location as any;
-        if (loc) {
-          const lat = loc.lat ?? loc.latitude;
-          const lon = loc.lon ?? loc.longitude;
-          if (typeof lat === "number" && typeof lon === "number") {
-            locationStr = `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
-          }
-        }
-      }
-    }
-
-    // 3. Fallback: if rawId itself is a direct Cloudflare image_id
-    if (!nativeBase64 && !targetImageId) {
-      targetImageId = rawId;
-    }
-
-    // Branch A: Note has native Base64 image
-    if (nativeBase64) {
-      const allowedMimes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-      if (!allowedMimes.includes(nativeMimeType)) {
-        throw new Error(`Unsupported image MIME type '${nativeMimeType}'. Anthropic Claude vision requires JPEG, PNG, WEBP, or GIF.`);
-      }
-
-      const byteLength = getBase64ByteLength(nativeBase64);
-      if (byteLength > 3 * 1024 * 1024) {
-        throw new Error(`Image size (${Math.round(byteLength / 1024)}KB) exceeds 3MB limit.`);
-      }
-
-      const content: any[] = [];
-      if (includeMetadata) {
-        const metaLines: string[] = [
-          `📷 **视觉图像元数据** [${rawId}]`,
-          `- 标题: ${title}`
-        ];
-        const details: string[] = [];
-        if (takenAt) details.push(`记录时间: ${takenAt}`);
-        if (locationStr) details.push(`位置: ${locationStr}`);
-        details.push(`规格: 便签原图 (${Math.round(byteLength / 1024)} KB, ${nativeMimeType})`);
-        metaLines.push(`- ${details.join(" | ")}`);
-        content.push({ type: "text", text: metaLines.join("\n") });
-      }
-
-      content.push({
-        type: "image",
-        data: nativeBase64,
-        mimeType: nativeMimeType
-      });
-
-      return { content };
-    }
-
-    // Branch B: Fetch from Cloudflare Images via signed URL
-    if (!targetImageId) {
-      throw new Error(`Image '${rawId}' not found or unauthorized.`);
-    }
-
-    const variants = await getSignedImageVariants(targetImageId, env, 7200);
-    const fetchUrl = variants[variant as "ai512" | "ai768" | "ai1024"];
-    if (!fetchUrl) {
-      throw new Error(`Variant '${variant}' is not available.`);
-    }
-
-    // Guardrail: Fetch with strict Accept header (anti-AVIF), 8s timeout, 1 retry on network/5xx
-    let response: Response | null = null;
-    let lastError: any = null;
-
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        response = await fetch(fetchUrl, {
-          method: "GET",
-          headers: {
-            "Accept": "image/jpeg,image/png,image/webp",
-            "User-Agent": "Constancy-MCP/1.6.0"
-          },
-          signal: AbortSignal.timeout(8000)
-        });
-
-        if (response.ok) {
-          break;
-        }
-
-        // 4xx client errors (e.g. 404 Not Found) - do not retry
-        if (response.status >= 400 && response.status < 500) {
-          break;
-        }
-      } catch (err: any) {
-        lastError = err;
-        if (attempt === 0) {
-          await new Promise(resolve => setTimeout(resolve, 200));
-        }
-      }
-    }
-
-    if (!response) {
-      throw new Error(`Failed to fetch image '${rawId}': ${lastError?.message || "Network timeout or connection error"}`);
-    }
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        throw new Error(`Image '${rawId}' was not found on image storage (HTTP 404).`);
-      }
-      throw new Error(`Image delivery failed for '${rawId}': HTTP ${response.status} ${response.statusText}`);
-    }
-
-    // MIME type validation & AVIF defense
-    const rawContentType = response.headers.get("content-type") || "";
-    const mimeType = rawContentType.split(";")[0].trim().toLowerCase();
-
-    if (mimeType === "image/avif") {
-      throw new Error("Received unsupported AVIF format from image provider. Anthropic Claude vision requires JPEG, PNG, WEBP, or GIF.");
-    }
-
-    const allowedMimes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-    if (!allowedMimes.includes(mimeType)) {
-      throw new Error(`Unsupported image MIME type: '${mimeType}'. Supported formats are JPEG, PNG, WEBP, and GIF.`);
-    }
-
-    // Content length pre-check
-    const contentLength = response.headers.get("content-length");
-    if (contentLength && parseInt(contentLength, 10) > 3 * 1024 * 1024) {
-      throw new Error(`Image size (${Math.round(parseInt(contentLength, 10) / 1024)}KB) exceeds 3MB limit. Please choose a smaller variant (e.g. 'ai512').`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    if (arrayBuffer.byteLength > 3 * 1024 * 1024) {
-      throw new Error(`Image size (${Math.round(arrayBuffer.byteLength / 1024)}KB) exceeds 3MB limit. Please choose a smaller variant (e.g. 'ai512').`);
-    }
-    if (arrayBuffer.byteLength === 0) {
-      throw new Error(`Fetched image is empty (0 bytes).`);
-    }
-
-    // Base64 encoding via helper
-    const base64Data = arrayBufferToBase64(arrayBuffer);
-
-    const content: any[] = [];
-    if (includeMetadata) {
-      const metaLines: string[] = [
-        `📷 **视觉图像元数据** [${rawId}]`,
-        `- 标题: ${title}`
-      ];
-      const details: string[] = [];
-      if (takenAt) details.push(`拍摄时间: ${takenAt}`);
-      if (locationStr) details.push(`位置: ${locationStr}`);
-      details.push(`变体规格: ${variant} (${Math.round(arrayBuffer.byteLength / 1024)} KB, ${mimeType})`);
-      metaLines.push(`- ${details.join(" | ")}`);
-      content.push({ type: "text", text: metaLines.join("\n") });
-    }
-
-    content.push({
-      type: "image",
-      data: base64Data,
-      mimeType: mimeType
-    });
-
-    return { content };
+    return {
+      success: true,
+      id: targetId,
+      type: "note_attachment",
+      title: p.title || undefined,
+      download_url: downloadUrl,
+      mime_type: p.mime_type || "application/octet-stream",
+      sha256: sha256 || undefined,
+      size_bytes: exactBytes,
+      expires_at: new Date(exp * 1000).toISOString(),
+      curl_command: `curl -s -o attachment "${downloadUrl}"`
+    };
   }
 
   // 12. Tool: create_upload_url
@@ -2935,332 +2419,6 @@ export async function executeToolCall(
       mime_type: mimeType,
       expires_at: new Date(exp * 1000).toISOString(),
       curl_command: `curl -X PUT -H "Content-Type: ${mimeType}" --data-binary @filename "${uploadUrl}"`
-    };
-  }
-
-  // 13. Tool: request_image_upload
-  if (name === "request_image_upload") {
-    const filename = (args.filename || "image.jpg").trim();
-    let uploadUrl = "";
-    let imageId = "";
-
-    // 1. Prefer native IMAGES binding if available
-    if (env.IMAGES?.hosted?.createDirectUpload) {
-      try {
-        const directRes = await env.IMAGES.hosted.createDirectUpload({
-          metadata: { user_id: userId, filename },
-          requireSignedURLs: true,
-          expiresIn: 1800
-        });
-        uploadUrl = directRes.uploadURL;
-        imageId = directRes.id;
-      } catch (err) {
-        console.error("IMAGES.hosted.createDirectUpload error, falling back to REST API:", err);
-      }
-    }
-
-    // 2. Fallback to Cloudflare Images REST API v2
-    if (!uploadUrl || !imageId) {
-      const token = env.CLOUDFLARE_API_TOKEN?.trim();
-      const accountId = env.CLOUDFLARE_ACCOUNT_ID?.trim() || "00f6c85f82f6297c8c0bef9460e013d9";
-      if (!token) throw new Error("CLOUDFLARE_API_TOKEN is not configured on MCP server");
-
-      const formData = new FormData();
-      formData.append("requireSignedURLs", "true");
-      formData.append("metadata", JSON.stringify({ user_id: userId, filename }));
-
-      const cfRes = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/images/v2/direct_upload`, {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${token}`
-        },
-        body: formData
-      });
-
-      if (!cfRes.ok) {
-        const err = await cfRes.text();
-        throw new Error(`Cloudflare Images direct_upload failed (${cfRes.status}): ${err}`);
-      }
-
-      const cfData: any = await cfRes.json();
-      uploadUrl = cfData.result?.uploadURL;
-      imageId = cfData.result?.id;
-
-      if (!uploadUrl || !imageId) {
-        throw new Error("Failed to obtain uploadURL from Cloudflare Images");
-      }
-    }
-
-    return {
-      success: true,
-      image_id: imageId,
-      upload_url: uploadUrl,
-      filename,
-      require_signed_urls: true,
-      instructions: `请在沙箱中按以下 3 步完成照片入库：
-1. 【直传图片】使用 curl 上传二进制（零 Token 上下文传输）：
-   curl -X POST -F "file=@<本地图片绝对路径>" "${uploadUrl}"
-2. 【提取元数据】如果本地沙箱有权限，建议运行 exiftool 或相关命令提取拍摄时间 (DateTimeOriginal)、GPS 经纬度及机型参数。
-3. 【观察画面并入库】上传成功后，发挥原生视觉大模型能力深度观察画面细节，调用 commit_image_record 传入 image_id ("${imageId}")、description、captured_at、latitude、longitude 与 exif，正式完成图库与便签入库。`
-    };
-  }
-
-  // 14. Tool: commit_image_record
-  if (name === "commit_image_record") {
-    const imageId = (args.image_id || "").trim();
-    if (!imageId) throw new Error("Missing image_id");
-    const description = (args.description || "").trim();
-    if (!description) throw new Error("Missing description");
-
-    // Validate that image actually exists in Cloudflare Images before saving to Qdrant
-    if (env.IMAGES?.hosted?.image) {
-      try {
-        await env.IMAGES.hosted.image(imageId).details();
-      } catch (err: any) {
-        throw new Error(`Cloudflare Images 中未找到 ID '${imageId}'，请核对 request_image_upload 返回的真实 image_id: ${err?.message || err}`);
-      }
-    }
-
-    // 🌟 FIX-1: Check if an image point already exists in images collection (True Upsert by image_id)
-    const existingImgPoints = await findImagePointsByImageId(imageId, userId, env);
-    const existingImgPoint = existingImgPoints[0] || null;
-    const isUpdate = Boolean(existingImgPoint);
-    const imagePointId = existingImgPoint ? existingImgPoint.id : crypto.randomUUID();
-
-    // 🌟 FIX-2: Resilient tags parsing (array, JSON string, comma-separated) and inheritance
-    const rawTags = args.tags ?? args.tag;
-    let inputTags: string[] = [];
-    if (Array.isArray(rawTags)) {
-      inputTags = rawTags.map((t: any) => String(t).trim()).filter(Boolean);
-    } else if (typeof rawTags === "string") {
-      try {
-        const parsed = JSON.parse(rawTags);
-        if (Array.isArray(parsed)) {
-          inputTags = parsed.map((t: any) => String(t).trim()).filter(Boolean);
-        } else {
-          inputTags = rawTags.split(/[,，\s]+/).map(t => t.trim()).filter(Boolean);
-        }
-      } catch {
-        inputTags = rawTags.split(/[,，\s]+/).map(t => t.trim()).filter(Boolean);
-      }
-    }
-
-    // If updating and no tags passed, inherit existing tags
-    if (inputTags.length === 0 && existingImgPoint?.payload?.tags && Array.isArray(existingImgPoint.payload.tags)) {
-      inputTags = existingImgPoint.payload.tags;
-    }
-    const tags = [...new Set([...inputTags, "image"])];
-
-    const title = (args.title || "").trim() || (existingImgPoint?.payload?.title || (args.filename || "image.jpg").trim());
-    const filename = (args.filename || "").trim() || existingImgPoint?.payload?.filename || "image.jpg";
-
-    let location: { lat: number; lon: number } | null = null;
-    if (typeof args.latitude === "number" && typeof args.longitude === "number") {
-      location = { lat: args.latitude, lon: args.longitude };
-    }
-    const exif = args.exif && typeof args.exif === "object" ? { ...args.exif } : (existingImgPoint?.payload?.exif || null);
-    if (!location && exif) {
-      const eLat = exif.latitude ?? exif.lat;
-      const eLon = exif.longitude ?? exif.lon;
-      if (typeof eLat === "number" && typeof eLon === "number") {
-        location = { lat: eLat, lon: eLon };
-      }
-    }
-    if (!location && existingImgPoint?.payload?.location) {
-      location = existingImgPoint.payload.location;
-    }
-
-    const nowIso = now.toISOString();
-
-    // Determine canonical ISO 8601 captured_at
-    let capturedAtIso: string | null = null;
-    if (args.captured_at) {
-      capturedAtIso = normalizeIsoDate(args.captured_at);
-    }
-    if (!capturedAtIso && exif?.dateTime) {
-      capturedAtIso = normalizeIsoDate(exif.dateTime);
-    }
-    if (!capturedAtIso && existingImgPoint?.payload?.captured_at) {
-      capturedAtIso = existingImgPoint.payload.captured_at;
-    }
-    if (!capturedAtIso) {
-      capturedAtIso = nowIso;
-    }
-
-    // Ensure exif.dateTime is canonical ISO format if exif is present
-    if (exif && capturedAtIso) {
-      exif.dateTime = capturedAtIso;
-    }
-
-    const createdAt = existingImgPoint?.payload?.created_at || nowIso;
-
-    // Vectorize description with Voyage Multimodal 3.5 (1024-dim)
-    const textToEmbed = title ? `${title}\n${description}\n${tags.join(" ")}` : `${description}\n${tags.join(" ")}`;
-    const vector = await getEmbedding(textToEmbed, env, "document");
-
-    // 1. Ingest into Qdrant 'images' collection (Upsert in place)
-    const qdrantUrl = `${env.QDRANT_URL.replace(/\/+$/, "")}/collections/images/points?wait=true`;
-    const imagePayload = {
-      user_id: userId,
-      image_id: imageId,
-      filename,
-      title: title || filename,
-      description,
-      tags,
-      exif,
-      location,
-      captured_at: capturedAtIso,
-      created_at: createdAt,
-      updated_at: nowIso,
-      source: "claude"
-    };
-
-    const imageRes = await fetch(qdrantUrl, {
-      method: "PUT",
-      headers: {
-        "api-key": env.QDRANT_API_KEY?.trim(),
-        "Content-Type": "application/json",
-        "User-Agent": "curl/8.14.1 (constancy-mcp worker)"
-      },
-      body: JSON.stringify({
-        points: [
-          {
-            id: imagePointId,
-            vector,
-            payload: imagePayload
-          }
-        ]
-      })
-    });
-
-    if (!imageRes.ok) {
-      const err = await imageRes.text();
-      throw new Error(`Qdrant upsert to 'images' collection failed (${imageRes.status}): ${err}`);
-    }
-
-    // Clean up any historical duplicate points in images collection
-    if (existingImgPoints.length > 1) {
-      const redundantIds = existingImgPoints.slice(1).map(p => p.id);
-      await deleteImagePoints(redundantIds, env);
-    }
-
-    // 2. Ingest or update Note in 'constancy_memories' collection
-    let notePointId: string | null = null;
-    let revisionsCount = 0;
-    let noteAction: "updated" | "created" | "skipped" = "skipped";
-
-    const existingNote = await findNoteByImageId(imageId, userId, env);
-    const noteTitle = title || `[视觉资产] ${description.slice(0, 24)}...`;
-    const noteContent = `${description}\n\n[Cloudflare Images ID: ${imageId}]`;
-    const noteTags = [...new Set(["image", "gallery", ...tags])];
-
-    if (existingNote && existingNote.payload) {
-      // 🌟 FIX A & B: 无论 create_note 取值为何，只要存在关联便签，必须强制同步，绝不留滞后孤岛！
-      // 强制写入 revisions 审计链（最多保留最近 5 版），确保权威正文的每一次变动均有据可查。
-      notePointId = existingNote.id;
-      noteAction = "updated";
-
-      const oldP = existingNote.payload;
-      const oldContent = oldP.content || "";
-      const oldTitle = oldP.title || "";
-      const oldTags = Array.isArray(oldP.tags) ? oldP.tags : [];
-
-      const contentChanged = oldContent !== noteContent;
-      const titleChanged = oldTitle !== noteTitle;
-      const tagsChanged = JSON.stringify(oldTags.slice().sort()) !== JSON.stringify(noteTags.slice().sort());
-
-      const revisions: NoteRevision[] = Array.isArray(oldP.revisions) ? [...oldP.revisions] : [];
-
-      if (contentChanged || titleChanged || tagsChanged) {
-        const previousSnapshot: NoteRevision = {
-          timestamp: nowIso,
-          content: oldContent,
-          title: oldTitle || undefined,
-          tags: [...oldTags],
-          mime_type: oldP.mime_type,
-          sha256: oldP.sha256,
-          reason: isUpdate ? "commit_image_record 视觉描述与元数据同步更新" : "commit_image_record 便签同步更新"
-        };
-        revisions.push(previousSnapshot);
-        if (revisions.length > 5) {
-          revisions.splice(0, revisions.length - 5);
-        }
-      }
-      revisionsCount = revisions.length;
-
-      // 认知动力学：若内容或标题发生实质变更，重新注入意图能量，激活半衰期
-      let hSpectrum = oldP.h_spectrum || new Array(7).fill(0);
-      let tLastStrong = oldP.t_last_strong || nowMs;
-      if (contentChanged || titleChanged) {
-        const decayedH = decaySpectrum(hSpectrum, oldP.t_last_update || nowMs, nowMs);
-        hSpectrum = injectIntent(decayedH, 1.0);
-        tLastStrong = nowMs;
-      }
-
-      const notePayloadUpdate: MemoryPointPayload = {
-        ...oldP,
-        title: noteTitle,
-        content: noteContent,
-        tags: noteTags,
-        location: location || oldP.location || undefined,
-        captured_at: capturedAtIso || oldP.captured_at || nowIso,
-        created_at: oldP.created_at || oldP.timestamp || nowIso,
-        updated_at: nowIso,
-        timestamp: oldP.timestamp || nowIso,
-        t_last_update: nowMs,
-        t_last_strong: tLastStrong,
-        h_spectrum: hSpectrum,
-        image_id: imageId,
-        revisions
-      };
-
-      await upsertMemoryPoint(notePointId, vector, notePayloadUpdate, env);
-    } else if (args.create_note !== false) {
-      // 若关联便签尚不存在，且用户未显式指定 create_note: false，则初次创建外脑便签
-      notePointId = crypto.randomUUID();
-      noteAction = "created";
-      const notePayload: MemoryPointPayload = {
-        user_id: userId,
-        content: noteContent,
-        timestamp: nowIso,
-        created_at: nowIso,
-        captured_at: capturedAtIso || nowIso,
-        location: location || undefined,
-        date: capturedAtIso ? capturedAtIso.slice(0, 10) : todayStr,
-        type: "note",
-        entities: [],
-        tags: noteTags,
-        ch_prior: 11.0, // High constancy for assets
-        h_spectrum: injectIntent(new Array(7).fill(0), 1.0),
-        t_last_update: nowMs,
-        t_last_strong: nowMs,
-        title: noteTitle,
-        image_id: imageId,
-        mime_type: "image/jpeg",
-        revisions: []
-      };
-      await upsertMemoryPoint(notePointId, vector, notePayload, env);
-    }
-
-    let noteMessageDetail = "";
-    if (noteAction === "updated") {
-      noteMessageDetail = `已同步更新关联外脑便签 [${notePointId}] (历史版本数: ${revisionsCount})`;
-    } else if (noteAction === "created") {
-      noteMessageDetail = `已同步新建外脑便签 [${notePointId}]`;
-    } else {
-      noteMessageDetail = "未创建外脑便签 (create_note=false 且无既有便签)";
-    }
-
-    return {
-      success: true,
-      image_id: imageId,
-      point_id: imagePointId,
-      is_update: isUpdate,
-      note_id: notePointId,
-      revisions_count: revisionsCount,
-      title: title || filename,
-      tags,
-      message: `🖼️ 视觉资产成功${isUpdate ? "更新 (原地 Update)" : "入库"}！${noteMessageDetail}。`
     };
   }
 
