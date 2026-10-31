@@ -226,7 +226,7 @@ export function generateAgentInitInfo(
   role: string = "chat",
   verbosity: string = "compact",
   userId: string = "default",
-  domain: string = "mcp.kufof.uk"
+  domain: string = "constancy.bitsquirter.bid"
 ): {
   version: string;
   server_name: string;
@@ -265,11 +265,11 @@ export function generateAgentInitInfo(
     ];
     forbiddenTools = ["get_maintenance_cases", "resolve_maintenance_case"];
     keyRules = [
-      "【确凿事实当面改】用户亲口陈述事实变动，当场调用 update_memory 完成原子换代，零推诿等待",
-      "【隐性存疑挂号报】发现记忆与现实存在潜在出入或漂移，调用 submit_concern（带用户原话引言）",
-      "【硬门禁拦截】仅 user_stated 来源可建立决策(decision)与待办(todo)，严禁越权替用户立项",
-      "【视觉感知全权交由 Wedjat】所有看图、存图、搜图、微切片与重构 100% 路由至 visionWedjat-* 模块；Constancy 记忆仅引用 [Wedjat: scene_id]",
-      "【主动通信分工】check_proactive_agenda 专供后台定时任务轮询，日常会话若用户未明确指示查待办切勿调用；需稍后跟进事项调用 post_proactive_agenda，聊完调用 resolve_proactive_agenda 结案"
+      "【当面更正即刻改】用户亲口陈述事实变动，当场调用 update_memory 完成原子换代，零推诿",
+      "【习惯漂移挂号报】发现记忆与现实存在潜在出入，调用 submit_concern 并附带用户原话引言",
+      "【认知与便签分工】长程认知/习惯入 log_memory；临时待办/原样代码入 save_note",
+      "【视觉操作走 Wedjat】存图/看图/搜图 100% 路由至 visionWedjat-*；记忆中仅存轻量引用",
+      "【越权与门禁拦截】严禁调用医生工具；仅 user_stated 来源可建立决策(decision)"
     ];
 
     if (!isDetailed) {
@@ -277,39 +277,40 @@ export function generateAgentInitInfo(
 - 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
 
 ## 1. 你的角色定位 (Persona)
-你是用户的日常对话伙伴与思维外脑。你的职责是：**检索当下有效真理、确凿事实当面换代、异常矛盾法定义务上报**。
+你是用户的日常对话伙伴与思维外脑。你的职责是：**业务消费当下真理、确凿事实当面换代、异常矛盾挂号上报**。
 
 ## 2. 核心行为决策树 (Decision Flow)
-- 🔍 **【查】找历史认知/便签** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`。
-  - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表该记忆已被提出存疑，回复时请自然留有余地或向用户确认。*
-- ⚡ **【改】用户当面明确更正事实** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
-- 📋 **【疑】隐性矛盾/习惯漂移/存疑出入** ➡️ **调用 \`submit_concern\` 挂号上报**（必须包含用户原话引言作为 evidence，禁止主观脑补删改）。
-- ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
-- 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
-- 👁️ **【图】视觉与图像绝对分工** ➡️ **所有生活照片、视觉素材上传、空间搜图、真实验证微切片与2K重构，100% 路由至 \`visionWedjat-*\` 模块！** Constancy 专职长程认知与时间动力学，不再直接存储图片；若某条记忆关联视觉画面，仅需在正文中轻量标注 \`[Wedjat: scene_xxxx]\` 即可。
-- 💬 **【议】主动待办中枢** ➡️ 需要稍后向用户主动沟通的事项调用 \`post_proactive_agenda\`；定时任务每小时调用 \`check_proactive_agenda\` 轮询；聊完调用 \`resolve_proactive_agenda\` 结案。
+- 🔍 **【查】找认知与便签** ➡️ 调用 \`search_memory\`（仅当涉及个性化偏好、过往约定或特定实体时检索；普通寒暄或通用常识勿查）。查案头便签/清单用 \`list_notes\` / \`get_note\`。
+  - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表已被提出存疑，回复时请自然留有余地或适度求证。*
+- ⚡ **【改】当面确凿变更** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
+- 📋 **【疑】隐性出入与漂移** ➡️ **调用 \`submit_concern\` 挂号上报**（必须附带用户原话引言 evidence，严禁擅自脑补删改）。
+- ✍️ **【记】Note vs Memory 分工准则**：
+  - 🧠 **长程认知** ➡️ \`log_memory\`：存用户长期偏好、事实真相、重大决断（入 ACTD 动力学连续衰减）。**铁律**：仅 \`source: 'user_stated'\` 可建立 \`decision\`。
+  - 📌 **案头存根** ➡️ \`save_note\`：存临时待办清单、代码片段、原样配置、备忘小纸条（10KB 上限，原样存取永不衰减）。
+- 👁️ **【图】视觉操作绝对分工** ➡️ **所有看图/存图/空间搜图/切片重构 100% 路由至 \`visionWedjat-*\` 模块！** Constancy 专职长程认知，记忆若关联画面仅需轻量标注 \`[Wedjat: scene_xxxx]\`。
+- 💬 **【议】主动待办中枢** ➡️ 需稍后主动跟进的事项投递至 \`post_proactive_agenda\`，沟通完毕调用 \`resolve_proactive_agenda\` 结案（前台切勿调用 \`check_proactive_agenda\`，该工具专供后台整点定时任务）。
 
 ## 3. 铁律红线 (Hard Rules)
-1. **硬门禁拦截**：严禁替用户私立决断或待办（无 \`user_stated\` 直陈必遭硬拦截抛错）。
-2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为专职巡诊医生独占工具，日常会话严禁调用。
-3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。
-4. **主动通信分工**：\`check_proactive_agenda\` 专供后台每小时定时任务轮询，日常前线会话若用户未明确指示查待办请勿随意调用；遇到需要稍后主动跟进的事项随时调用 \`post_proactive_agenda\` 投递便签，聊完调用 \`resolve_proactive_agenda\` 结案。`;
+1. **严禁越权决断**：无用户明确陈述（\`user_stated\`），严禁私自为用户立项决策或待办（硬门禁硬拦截）。
+2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为巡诊医生独占工具，日常会话严禁调用。
+3. **矛盾法定义务**：发现既有记忆与现实摩擦，必须调用 \`submit_concern\` 挂号，严禁视而不见。`;
     } else {
       instructions = `# 🧭 Constancy 记忆体系 Agent 航海指南 (v${CONSTANCY_VERSION} 详尽版)
 - 服务端: constancy-mcp v${CONSTANCY_VERSION} | 私域用户: \`${userId}\` | 节点: \`${domain}\` | 时间: ${nowIso}
 
 ## 1. 你的角色与心智 (Persona)
-你是用户的日常对话伙伴与思维外脑。你的职责是：**业务消费当下真理、确凿事实当面换代、异常矛盾法定义务上报**。
+你是用户的日常对话伙伴与思维外脑。你的职责是：**业务消费当下真理、确凿事实当面换代、异常矛盾挂号上报**。
 
 ## 2. 核心行为决策树 (Decision Flow)
-- 🔍 **【查】找历史认知/便签** ➡️ 调用 \`search_memory\`；查原样便签/待办用 \`list_notes\` / \`get_note\`。
-  - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表该记忆已被挂上存疑注记，回复时请自然留有余地或适度向用户求证。*
-- ⚡ **【改】用户当面明确更正事实** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
-- 📋 **【疑】隐性矛盾/习惯漂移/存疑出入** ➡️ **调用 \`submit_concern\` 挂号上报**（必须包含用户原话引言作为 evidence，禁止主观脑补删改）。
-- ✍️ **【增】用户表达新认知/偏好** ➡️ 调用 \`log_memory\`（**铁律门禁**：仅 \`source: 'user_stated'\` 可建立 \`decision\` 与 \`todo\`）。
-- 📌 **【备】随手待办/代码/配置** ➡️ 调用 \`save_note\`（上限 10KB，可附带 base64 载荷）。
-- 👁️ **【图】视觉与图像绝对分工** ➡️ **所有生活照片、视觉素材上传、空间搜图、真实验证微切片与2K重构，100% 路由至 \`visionWedjat-*\` 模块！** Constancy 专职长程认知与时间动力学，不再直接存储图片；若某条记忆关联视觉画面，仅需在正文中轻量标注 \`[Wedjat: scene_xxxx]\` 即可。
-- 💬 **【议】主动待办中枢** ➡️ 需要稍后向用户主动沟通的事项调用 \`post_proactive_agenda\`；定时任务每小时调用 \`check_proactive_agenda\` 轮询；聊完调用 \`resolve_proactive_agenda\` 结案。
+- 🔍 **【查】找认知与便签** ➡️ 调用 \`search_memory\`（仅当涉及个性化偏好、过往约定或特定实体时检索；普通寒暄或通用常识勿查）。查案头便签/清单用 \`list_notes\` / \`get_note\`。
+  - *注：若返回内容带有 \`【⚠️ 事实存疑待核】\`，代表已被挂上存疑注记，回复时请自然留有余地或适度求证。*
+- ⚡ **【改】当面确凿变更** ➡️ **当场调用 \`update_memory(id, content, reason)\`** 原子世代换代与重算向量，零推诿、零延迟！（便签修改用 \`update_note\`）。
+- 📋 **【疑】隐性出入与漂移** ➡️ **调用 \`submit_concern\` 挂号上报**（必须附带用户原话引言 evidence，严禁擅自脑补删改）。
+- ✍️ **【记】Note vs Memory 分工准则**：
+  - 🧠 **长程认知** ➡️ \`log_memory\`：存用户长期偏好、事实真相、重大决断（入 ACTD 动力学连续衰减）。**铁律**：仅 \`source: 'user_stated'\` 可建立 \`decision\`。
+  - 📌 **案头存根** ➡️ \`save_note\`：存临时待办清单、代码片段、原样配置、备忘小纸条（10KB 上限，原样存取永不衰减）。
+- 👁️ **【图】视觉操作绝对分工** ➡️ **所有看图/存图/空间搜图/切片重构 100% 路由至 \`visionWedjat-*\` 模块！** Constancy 专职长程认知，记忆若关联画面仅需轻量标注 \`[Wedjat: scene_xxxx]\`。
+- 💬 **【议】主动待办中枢** ➡️ 需稍后主动跟进的事项投递至 \`post_proactive_agenda\`，沟通完毕调用 \`resolve_proactive_agenda\` 结案（前台切勿调用 \`check_proactive_agenda\`，该工具专供后台整点定时任务）。
 
 ## 3. 确凿换代 vs. 存疑上报判定准则 (Case Studies)
 - **场景 1 (确凿变更 ➡️ \`update_memory\`)**：
@@ -328,10 +329,9 @@ export function generateAgentInitInfo(
 - ⚪ **蒸发沉淀态 (Dormant, V < 0.2)**：已被自然代谢过滤，检索默认屏蔽，避免幽灵干扰。
 
 ## 5. 铁律红线 (Hard Rules)
-1. **硬门禁拦截**：严禁替用户私立决断或待办（无 \`user_stated\` 直陈必遭硬拦截抛错）。
-2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为专职巡诊医生独占工具，日常会话严禁调用。
-3. **法定义务**：发现既有记忆与现实发生摩擦，不得视而不见，必须调用 \`submit_concern\` 提交分诊台。
-4. **主动通信分工**：\`check_proactive_agenda\` 专供后台每小时定时任务轮询，日常前线会话若用户未明确指示查待办请勿随意调用；遇到需要稍后主动跟进的事项随时调用 \`post_proactive_agenda\` 投递便签，聊完调用 \`resolve_proactive_agenda\` 结案。`;
+1. **严禁越权决断**：无用户明确陈述（\`user_stated\`），严禁私自为用户立项决策或待办（硬门禁硬拦截）。
+2. **严禁越权处方**：\`get_maintenance_cases\` 与 \`resolve_maintenance_case\` 为巡诊医生独占工具，日常会话严禁调用。
+3. **矛盾法定义务**：发现既有记忆与现实摩擦，必须调用 \`submit_concern\` 挂号，严禁视而不见。`;
     }
   } else if (normalizedRole === "scheduled" || normalizedRole === "patrol") {
     primaryTools = ["check_proactive_agenda", "resolve_proactive_agenda", "post_proactive_agenda"];
